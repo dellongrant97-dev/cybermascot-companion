@@ -3227,6 +3227,8 @@ api.onMedia((state) => {
 screenBtn.addEventListener('click', () => { noteActivity(); captureScreen(); });
 screenCaptureSkill.addEventListener('click', () => { noteActivity(); captureScreen(); });
 
+window.addEventListener('beforeunload', () => { if (voiceController) voiceController.stop(); });
+
 window.__mascot = {
   showView,
   startFocus,
