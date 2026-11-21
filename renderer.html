@@ -1,0 +1,1577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'">
+<title>CyberMascot</title>
+<link rel="stylesheet" href="vendor/prism.css">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: transparent; overflow: hidden; }
+  body {
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: #f4f4f7;
+    user-select: none;
+    pointer-events: none;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    --glass: 0.55;
+  }
+  .hit { pointer-events: auto; }
+  input, textarea, button, select { font: inherit; color: inherit; }
+  input:focus, select:focus { outline: none; }
+  ::-webkit-scrollbar { width: 0; height: 0; }
+
+  #app {
+    height: 100%;
+    position: relative;
+    display: flex;
+    align-items: flex-end;
+    gap: 22px;
+    padding: 22px;
+  }
+  #app.dock-right { flex-direction: row; justify-content: flex-end; }
+  #app.dock-left { flex-direction: row-reverse; justify-content: flex-end; }
+
+  .panels {
+    display: flex;
+    align-items: stretch;
+    gap: 12px;
+    transform-origin: bottom right;
+    transition: opacity .26s ease, transform .34s cubic-bezier(.2, .9, .25, 1);
+  }
+  #app.dock-left .panels { transform-origin: bottom left; }
+  #app.collapsed .panels {
+    opacity: 0;
+    transform: translateY(10px) scale(.96);
+    pointer-events: none;
+  }
+
+  .panel {
+    height: 470px;
+    background: rgba(20, 20, 25, var(--glass));
+    backdrop-filter: blur(8px) saturate(120%);
+    -webkit-backdrop-filter: blur(8px) saturate(120%);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 24px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+  }
+
+  .side {
+    width: 322px;
+    display: flex;
+    flex-direction: column;
+    padding: 14px 14px 12px;
+    position: relative;
+  }
+
+  .panel-head {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    flex: none;
+  }
+  .panel-head .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #9ef0b8;
+    box-shadow: 0 0 10px rgba(158, 240, 184, 0.6);
+    flex: none;
+  }
+  .tabs { display: flex; gap: 3px; }
+  .tab {
+    background: none;
+    border: 0;
+    border-radius: 8px;
+    padding: 4px 9px;
+    font-size: 9.5px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: rgba(244, 244, 247, 0.45);
+    cursor: pointer;
+  }
+  .tab:hover { color: rgba(244, 244, 247, 0.8); }
+  .tab.active { color: #f4f4f7; background: rgba(255, 255, 255, 0.1); }
+
+  .icon-btn {
+    margin-left: auto;
+    width: 26px;
+    height: 26px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border-radius: 9px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.05);
+    color: rgba(244, 244, 247, 0.7);
+    cursor: pointer;
+  }
+  .icon-btn:hover { background: rgba(255, 255, 255, 0.12); }
+  .icon-btn svg { width: 14px; height: 14px; display: block; }
+
+  .views { position: relative; flex: 1; min-height: 0; margin-top: 9px; }
+  .view {
+    position: absolute;
+    inset: 0;
+    display: none;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .view.active { display: flex; }
+
+  .chat-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+    padding-bottom: 7px;
+  }
+  .chat-bar .grow { flex: 1; }
+  .model-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 158px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    padding: 3px 7px;
+    font-size: 9.5px;
+    letter-spacing: .02em;
+    color: rgba(244, 244, 247, 0.72);
+    cursor: pointer;
+  }
+  .model-btn:hover { background: rgba(255, 255, 255, 0.12); }
+  .model-btn .model-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .model-btn .caret { font-size: 7px; opacity: .55; flex: none; }
+
+  .model-menu {
+    position: absolute;
+    top: 8px;
+    right: 0;
+    z-index: 20;
+    width: 206px;
+    padding: 5px;
+    border-radius: 14px;
+    background: rgba(24, 24, 30, 0.94);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    box-shadow: 0 20px 44px rgba(0, 0, 0, 0.55);
+    display: none;
+  }
+  .model-menu.open { display: block; }
+  .model-scroll { max-height: 176px; overflow-y: auto; }
+  .model-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: 0;
+    color: rgba(244, 244, 247, 0.85);
+    font-size: 11px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .model-item:hover { background: rgba(255, 255, 255, 0.1); }
+  .model-item .check { width: 10px; flex: none; color: #9ef0b8; font-size: 9px; }
+  .model-item .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .model-item .size { margin-left: auto; flex: none; color: rgba(244, 244, 247, 0.35); font-size: 9px; }
+  .model-note {
+    font-size: 10px;
+    line-height: 1.45;
+    color: rgba(244, 244, 247, 0.45);
+    padding: 7px 8px;
+  }
+  .model-refresh {
+    width: 100%;
+    margin-top: 4px;
+    padding: 5px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.07);
+    color: rgba(244, 244, 247, 0.7);
+    font-size: 9.5px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .model-refresh:hover { background: rgba(255, 255, 255, 0.13); }
+
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 2px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    mask-image: linear-gradient(to top, transparent 0, #000 26px);
+  }
+  .msg {
+    max-width: 94%;
+    font-size: 12px;
+    line-height: 1.45;
+    padding: 8px 10px;
+    border-radius: 14px;
+    word-break: break-word;
+    white-space: pre-wrap;
+  }
+  .msg.bot {
+    align-self: flex-start;
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-bottom-left-radius: 6px;
+    color: rgba(244, 244, 247, 0.9);
+  }
+  .msg.user {
+    align-self: flex-end;
+    background: rgba(255, 255, 255, 0.16);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-bottom-right-radius: 6px;
+  }
+  .msg.rich { white-space: normal; padding: 8px 9px; }
+  .msg.briefing-card {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 9px;
+    white-space: normal;
+    background: rgba(115, 160, 190, 0.1);
+    border-color: rgba(170, 210, 235, 0.18);
+  }
+  .briefing-header { display: flex; align-items: center; gap: 8px; }
+  .briefing-title { font-size: 11px; font-weight: 650; }
+  .briefing-task-actions { display: grid; gap: 4px; margin-top: 6px; }
+  .briefing-task-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+  .briefing-task-row > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
+  .briefing-task-row .mini-btn { flex: none; padding: 3px 6px; }
+  .briefing-dismiss {
+    margin-left: auto;
+    border: 0;
+    padding: 0 3px;
+    background: transparent;
+    color: rgba(244, 244, 247, 0.55);
+    font: inherit;
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .briefing-dismiss:hover { color: #fff; }
+  .briefing-tasks { margin-top: 5px; font-size: 10.5px; line-height: 1.4; }
+  .briefing-news { margin-top: 7px; padding-top: 6px; border-top: 1px solid rgba(255, 255, 255, 0.1); }
+  .news-heading { font-size: 11px; font-weight: 600; margin-bottom: 5px; }
+  .news-story {
+    margin-top: 5px;
+    padding: 5px 6px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.045);
+  }
+  .news-story button {
+    width: 100%;
+    border: 0;
+    padding: 0;
+    background: none;
+    color: rgba(244, 244, 247, 0.92);
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
+  }
+  .news-story button:hover { color: #a9d4ff; }
+  .news-story button:disabled { opacity: .6; cursor: default; }
+  .news-topic { font-size: 8px; letter-spacing: .1em; text-transform: uppercase; color: rgba(158, 240, 184, 0.78); }
+  .news-source, .news-note, .news-status { margin-top: 3px; font-size: 9px; color: rgba(244, 244, 247, 0.48); }
+  .news-refresh { margin-top: 6px; }
+  .msg.typing { display: flex; gap: 4px; align-items: center; height: 17px; }
+  .msg.typing i {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.55);
+    animation: pulse 1.1s ease-in-out infinite;
+  }
+  .msg.typing i:nth-child(2) { animation-delay: .15s; }
+  .msg.typing i:nth-child(3) { animation-delay: .3s; }
+  @keyframes pulse {
+    0%, 100% { opacity: .25; transform: translateY(0); }
+    50% { opacity: 1; transform: translateY(-2px); }
+  }
+
+  .md { font-size: 11.5px; line-height: 1.5; }
+  .md p { margin: 0 0 6px; }
+  .md p:last-child { margin-bottom: 0; }
+  .md ul, .md ol { margin: 4px 0 6px 16px; }
+  .md li { margin: 1px 0; }
+  .md h1, .md h2, .md h3 { font-size: 12.5px; margin: 6px 0 4px; }
+  .md strong { color: #fff; }
+  .md a { color: #a9d4ff; }
+  .md code { font-family: "Cascadia Code", Consolas, "Courier New", monospace; font-size: 10.5px; background: rgba(255, 255, 255, 0.1); border-radius: 4px; padding: 1px 4px; }
+  .md pre { margin: 7px 0 3px; padding: 0; border-radius: 10px; overflow: hidden; background: #12141b; border: 1px solid rgba(255, 255, 255, 0.1); }
+  .md pre code { display: block; background: transparent; padding: 9px 10px; overflow-x: auto; font-size: 10.5px; line-height: 1.5; }
+  .code-bar {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 6px 4px 9px;
+    background: rgba(255, 255, 255, 0.05);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .code-bar .lang { font-size: 8.5px; letter-spacing: .12em; text-transform: uppercase; color: rgba(244, 244, 247, 0.45); }
+  .code-bar .acts { margin-left: auto; display: flex; gap: 4px; }
+  .code-bar button {
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.06);
+    color: rgba(244, 244, 247, 0.75);
+    border-radius: 6px;
+    padding: 2px 6px;
+    font-size: 9px;
+    cursor: pointer;
+  }
+  .code-bar button:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
+
+  .attach-strip {
+    display: none;
+    flex-wrap: wrap;
+    gap: 5px;
+    flex: none;
+    padding-bottom: 6px;
+  }
+  .attach-strip.show { display: flex; }
+  .attach-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 10px;
+    padding: 3px 6px;
+    font-size: 10px;
+    color: rgba(244, 244, 247, 0.8);
+  }
+  .attach-chip img { width: 34px; height: 22px; object-fit: cover; border-radius: 5px; display: block; }
+  .attach-chip .chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
+  .attach-chip button { background: none; border: 0; color: rgba(255, 255, 255, 0.55); cursor: pointer; font-size: 12px; line-height: 1; padding: 0 1px; }
+  .attach-chip button:hover { color: #fff; }
+
+  .msg img.shot { display: block; width: 100%; border-radius: 9px; margin-bottom: 6px; border: 1px solid rgba(255, 255, 255, 0.14); }
+
+  .mascot-wrap.drop::after {
+    content: "";
+    position: absolute;
+    inset: -8px;
+    border-radius: 50%;
+    border: 2px dashed rgba(170, 236, 255, 0.85);
+    box-shadow: 0 0 26px rgba(150, 225, 255, 0.35);
+    animation: dashSpin 10s linear infinite;
+    pointer-events: none;
+  }
+  @keyframes dashSpin { to { transform: rotate(360deg); } }
+
+  .notes {
+    position: absolute;
+    top: -10px;
+    left: -16px;
+    width: 56px;
+    height: 70px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity .5s ease;
+  }
+  #app.vibing .notes { opacity: 1; }
+  .notes span {
+    position: absolute;
+    color: rgba(190, 170, 255, 0.85);
+    text-shadow: 0 0 10px rgba(150, 120, 255, 0.5);
+    animation: noteFloat 4.6s ease-in-out infinite;
+    font-size: 14px;
+  }
+  .notes span:nth-child(1) { left: 4px; bottom: 0; animation-delay: 0s; }
+  .notes span:nth-child(2) { left: 22px; bottom: 14px; font-size: 17px; animation-delay: 1.4s; }
+  .notes span:nth-child(3) { left: 10px; bottom: 30px; font-size: 13px; animation-delay: 2.6s; }
+  @keyframes noteFloat {
+    0% { opacity: 0; transform: translate(0, 6px) scale(.9) rotate(-6deg); }
+    25% { opacity: .95; }
+    80% { opacity: 0; transform: translate(10px, -26px) scale(1.08) rotate(8deg); }
+    100% { opacity: 0; }
+  }
+
+  #accVisor, #accHat, #accMug { opacity: 0; transition: opacity .45s ease; }
+  #app[data-accessory="visor"] #accVisor { opacity: 1; }
+  #app[data-accessory="wizard"] #accHat { opacity: 1; }
+  #app[data-accessory="coffee"] #accMug { opacity: 1; }
+  #accHeadphones {
+    opacity: 0;
+    transform: translateY(-12px);
+    transition: opacity .5s ease, transform .5s cubic-bezier(.2, .9, .25, 1);
+  }
+  #app.headphones-on #accHeadphones { opacity: 1; transform: translateY(0); }
+
+  .media-row { display: flex; align-items: center; gap: 6px; margin-top: 7px; }
+  .media-row .state { font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase; color: rgba(244, 244, 247, 0.42); margin-left: auto; }
+
+  .chat-form {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex: none;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 14px;
+    padding: 4px 4px 4px 5px;
+    transition: border-color .2s ease, box-shadow .2s ease;
+  }
+  .chat-form.listening {
+    border-color: rgba(158, 240, 184, 0.55);
+    box-shadow: 0 0 0 3px rgba(158, 240, 184, 0.12);
+  }
+  .chat-form input {
+    flex: 1;
+    min-width: 0;
+    background: none;
+    border: 0;
+    font-size: 12px;
+    padding: 3px 2px;
+    color: #f4f4f7;
+  }
+  .chat-form input::placeholder { color: rgba(244, 244, 247, 0.3); }
+  .round-btn {
+    width: 25px;
+    height: 25px;
+    flex: none;
+    border-radius: 9px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.08);
+    cursor: pointer;
+    color: rgba(255, 255, 255, 0.85);
+    display: grid;
+    place-items: center;
+  }
+  .round-btn:hover { background: rgba(255, 255, 255, 0.17); }
+  .round-btn svg { width: 12px; height: 12px; display: block; }
+  .round-btn.listening { background: rgba(158, 240, 184, 0.24); color: #c9ffdd; border-color: rgba(158, 240, 184, 0.4); }
+
+  .skills-scroll, .settings-scroll {
+    flex: 1;
+    overflow-y: auto;
+    padding: 2px 1px 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    mask-image: linear-gradient(to bottom, #000 94%, transparent 100%);
+  }
+  .skill-card {
+    background: rgba(255, 255, 255, 0.045);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    padding: 9px 10px;
+  }
+  .skill-card h3 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: rgba(244, 244, 247, 0.72);
+    font-weight: 600;
+  }
+  .skill-card h3 svg { width: 12px; height: 12px; flex: none; opacity: .8; }
+  .skill-card p { margin-top: 3px; font-size: 10.5px; line-height: 1.4; color: rgba(244, 244, 247, 0.45); }
+  .skill-card .row { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+  .desktop-search-form .row { flex-wrap: nowrap; }
+  .desktop-search-form input { width: auto; min-width: 0; flex: 1; }
+  .mini-btn {
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.07);
+    border-radius: 8px;
+    padding: 4px 8px;
+    font-size: 10px;
+    color: rgba(244, 244, 247, 0.8);
+    cursor: pointer;
+  }
+  .mini-btn:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
+  .mini-btn:disabled { opacity: .5; cursor: wait; }
+  .mini-btn.danger { color: #ffb1a0; border-color: rgba(255, 140, 110, 0.25); }
+  .mini-btn.danger:hover { background: rgba(255, 140, 110, 0.18); }
+  .list-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 0;
+    font-size: 10.5px;
+    color: rgba(244, 244, 247, 0.78);
+  }
+  .list-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .list-row .meta { flex: none; font-size: 9.5px; color: rgba(244, 244, 247, 0.4); }
+  .list-row .mini-btn { padding: 2px 6px; font-size: 9px; }
+  .clip-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: "Cascadia Code", Consolas, monospace; font-size: 9.5px; color: rgba(244, 244, 247, 0.65); }
+  .focus-line { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
+  .focus-line .time { font-family: "Cascadia Code", Consolas, monospace; font-size: 17px; letter-spacing: .04em; }
+  .focus-line .mini-btn { margin-left: auto; }
+
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field > label { font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase; color: rgba(244, 244, 247, 0.42); }
+  .field input[type="text"], .field input[type="password"], .field select {
+    width: 100%;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 9px;
+    padding: 5px 8px;
+    font-size: 11px;
+    color: #f4f4f7;
+  }
+  .field textarea {
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+    min-height: 46px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 9px;
+    padding: 6px 8px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: #f4f4f7;
+  }
+  .field input:focus, .field textarea:focus, .field select:focus { outline: 1px solid rgba(169, 212, 255, 0.45); }
+  .field select { cursor: pointer; }
+  .field select option { background: #1b1b22; color: #f4f4f7; }
+  button:focus-visible, [role="tab"]:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+    outline: 2px solid #a9d4ff !important;
+    outline-offset: 2px;
+  }
+  .hidden { display: none !important; }
+  .workspace-file { gap: 5px; }
+  .workspace-file .path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .coding-proposal pre, .command-output {
+    max-height: 220px;
+    overflow: auto;
+    padding: 8px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.28);
+    color: rgba(244, 244, 247, 0.85);
+    font: 9px/1.45 "Cascadia Code", Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .coding-session-note {
+    margin: 4px 0;
+    padding: 5px 7px;
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.045);
+    font-size: 10px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .coding-session-note time { display: block; margin-top: 3px; font-size: 8px; color: rgba(244, 244, 247, 0.42); }
+  .toggle {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 11px;
+    color: rgba(244, 244, 247, 0.78);
+    cursor: pointer;
+  }
+  .toggle input {
+    appearance: none;
+    width: 26px;
+    height: 15px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.12);
+    position: relative;
+    cursor: pointer;
+    transition: background .18s ease;
+    flex: none;
+  }
+  .toggle input::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.7);
+    transition: transform .18s ease;
+  }
+  .toggle input:checked { background: rgba(158, 240, 184, 0.55); }
+  .toggle input:checked::after { transform: translateX(11px); background: #fff; }
+  input[type="range"] { width: 100%; accent-color: #9ef0b8; cursor: pointer; }
+  .settings-note { font-size: 9.5px; color: rgba(244, 244, 247, 0.35); line-height: 1.4; }
+  .mini-btn.wide { width: 100%; text-align: center; margin-top: 2px; }
+  .click-through-indicator {
+    position: fixed;
+    z-index: 20;
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 6px 10px;
+    border: 1px solid rgba(169, 212, 255, 0.35);
+    border-radius: 999px;
+    background: rgba(15, 20, 28, 0.92);
+    color: #d7ecff;
+    font-size: 10px;
+    letter-spacing: .02em;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+
+  .thought-pop {
+    position: absolute;
+    right: 176px;
+    bottom: 208px;
+    width: 252px;
+    z-index: 40;
+    padding: 10px 12px;
+    border-radius: 16px;
+    background: rgba(24, 24, 30, 0.94);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    box-shadow: 0 18px 42px rgba(0, 0, 0, 0.55);
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: rgba(244, 244, 247, 0.92);
+    opacity: 0;
+    transform: translateY(8px) scale(.96);
+    transition: opacity .24s ease, transform .3s cubic-bezier(.2, .9, .25, 1);
+    pointer-events: none;
+  }
+  #app.dock-left .thought-pop { right: auto; left: 176px; }
+  .thought-pop.show { opacity: 1; transform: translateY(0) scale(1); }
+
+  .bubble {
+    width: 322px;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    padding: 18px 18px 14px;
+  }
+
+  .thought-dots {
+    position: absolute;
+    bottom: 46px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+  }
+  #app.dock-right .thought-dots { right: -27px; }
+  #app.dock-left .thought-dots { left: -27px; }
+  .thought-dots i {
+    display: block;
+    background: rgba(22, 22, 28, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    border-radius: 50%;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    animation: drift 3.4s ease-in-out infinite;
+  }
+  .thought-dots i:nth-child(1) { width: 17px; height: 17px; }
+  .thought-dots i:nth-child(2) { width: 11px; height: 11px; animation-delay: .25s; }
+  .thought-dots i:nth-child(3) { width: 6px; height: 6px; animation-delay: .5s; }
+  .thought-dots.thinking i {
+    background: rgba(170, 236, 255, 0.95);
+    border-color: rgba(170, 236, 255, 0.55);
+    box-shadow: 0 0 12px rgba(140, 225, 255, 0.6);
+    animation: thinkPulse 1.05s ease-in-out infinite;
+  }
+  .thought-dots.thinking i:nth-child(2) { animation-delay: .16s; }
+  .thought-dots.thinking i:nth-child(3) { animation-delay: .32s; }
+  @keyframes thinkPulse {
+    0%, 100% { opacity: .22; transform: scale(.78); }
+    45% { opacity: 1; transform: scale(1.18); }
+  }
+  @keyframes drift {
+    0%, 100% { transform: translateY(0); opacity: .95; }
+    50% { transform: translateY(-2px); opacity: .7; }
+  }
+
+  .bubble-head { position: relative; }
+  .clock {
+    position: absolute;
+    top: 1px;
+    right: 0;
+    font-family: "Cascadia Code", Consolas, monospace;
+    font-size: 13px;
+    letter-spacing: .05em;
+    color: rgba(244, 244, 247, 0.82);
+    font-variant-numeric: tabular-nums;
+  }
+  .clock.hidden { display: none; }
+
+  .bubble-head h1 {
+    font-size: 19px;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+  }
+  .bubble-head p {
+    margin-top: 3px;
+    font-size: 10px;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: rgba(244, 244, 247, 0.5);
+  }
+
+  .weather-row {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    margin-top: 13px;
+    padding: 10px 12px;
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.055);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+  }
+  .wx-icon { width: 30px; height: 30px; flex: none; opacity: .92; }
+  .wx-icon svg { width: 100%; height: 100%; display: block; }
+  .wx-temp { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.05; }
+  .wx-temp .stale { font-size: 9px; color: rgba(255, 200, 150, 0.7); margin-left: 4px; letter-spacing: .06em; }
+  .wx-sub { font-size: 11px; color: rgba(244, 244, 247, 0.55); margin-top: 2px; }
+
+  .section-label {
+    margin-top: 15px;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    font-size: 10px;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: rgba(244, 244, 247, 0.5);
+  }
+  .section-label em { font-style: normal; color: rgba(244, 244, 247, 0.32); letter-spacing: .08em; }
+
+  .task-list {
+    list-style: none;
+    margin-top: 7px;
+    flex: 1;
+    overflow-y: auto;
+    padding-right: 2px;
+    mask-image: linear-gradient(to bottom, #000 88%, transparent 100%);
+  }
+  .task {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    padding: 5px 0;
+    font-size: 12.5px;
+    line-height: 1.35;
+  }
+  .task input[type="checkbox"] {
+    appearance: none;
+    width: 15px;
+    height: 15px;
+    margin-top: 1px;
+    flex: none;
+    border-radius: 5px;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    background: rgba(255, 255, 255, 0.06);
+    cursor: pointer;
+    position: relative;
+    transition: background .15s ease, border-color .15s ease;
+  }
+  .task input[type="checkbox"]:checked { background: #fff; border-color: #fff; }
+  .task input[type="checkbox"]:checked::after {
+    content: "";
+    position: absolute;
+    left: 4.5px;
+    top: 1.5px;
+    width: 4px;
+    height: 8px;
+    border: solid #000;
+    border-width: 0 1.6px 1.6px 0;
+    transform: rotate(42deg);
+  }
+  .task-content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .task-text { word-break: break-word; }
+  .task-reminder-time { font-size: 10px; color: rgba(244, 244, 247, 0.42); }
+  .task.done .task-text { opacity: .4; text-decoration: line-through; }
+  .task .del {
+    opacity: 0;
+    flex: none;
+    background: none;
+    border: 0;
+    color: rgba(255, 255, 255, 0.45);
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    padding: 2px 0 2px 4px;
+  }
+  .task:hover .del { opacity: 1; }
+  .empty {
+    font-size: 12px;
+    color: rgba(244, 244, 247, 0.35);
+    padding: 8px 0;
+  }
+
+  .quick-add {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-top: 6px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    padding-top: 8px;
+  }
+  .quick-add-row { display: flex; align-items: center; gap: 6px; }
+  .quick-add-row input {
+    flex: 1;
+    min-width: 0;
+    background: none;
+    border: 0;
+    font-size: 12px;
+    padding: 3px 2px;
+    color: #f4f4f7;
+  }
+  .quick-add-row input::placeholder { color: rgba(244, 244, 247, 0.3); }
+  .quick-add button {
+    width: 21px;
+    height: 21px;
+    flex: none;
+    border-radius: 7px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.08);
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    color: rgba(255, 255, 255, 0.8);
+  }
+  .quick-add button:hover { background: rgba(255, 255, 255, 0.16); }
+  .task-reminder-field { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 9.5px; color: rgba(244, 244, 247, 0.42); }
+  .task-reminder-field input {
+    width: 156px;
+    min-width: 0;
+    color: #f4f4f7;
+    color-scheme: dark;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    padding: 3px 5px;
+    font: inherit;
+  }
+  .optimizer-note, .diagnostics-status { margin-top: 6px; font-size: 9.5px; line-height: 1.4; color: rgba(244, 244, 247, 0.42); }
+
+  .metrics {
+    margin-top: 10px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 7px 12px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    flex: none;
+  }
+  .metric { min-width: 0; }
+  .metric .row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 9.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: rgba(244, 244, 247, 0.42);
+  }
+  .metric .row b {
+    font-weight: 600;
+    letter-spacing: .02em;
+    text-transform: none;
+    font-size: 10.5px;
+    color: rgba(244, 244, 247, 0.85);
+  }
+  .metric .bar {
+    margin-top: 4px;
+    height: 3px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.1);
+    overflow: hidden;
+  }
+  .metric .bar i {
+    display: block;
+    height: 100%;
+    width: 0%;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.72);
+    transition: width .7s ease;
+  }
+  .metric.warn .bar i { background: #ff9d6b; }
+  .metric.warn .row b { color: #ffb38a; }
+
+  .mascot-wrap {
+    position: relative;
+    width: 164px;
+    height: 164px;
+    flex: none;
+    margin-bottom: 4px;
+    --glow-color: rgba(180, 240, 255, 0.35);
+    --glow-opacity: 0.5;
+    filter: drop-shadow(0 20px 34px rgba(0, 0, 0, 0.4)) drop-shadow(0 0 22px var(--glow-color));
+    transition: filter 1s ease, --glow-opacity 1s ease;
+  }
+  .mascot-wrap::before {
+    content: "";
+    position: absolute;
+    inset: -20px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 50% 55%, var(--glow-color) 0%, transparent 68%);
+    opacity: var(--glow-opacity);
+    filter: blur(14px);
+    transition: opacity 1s ease, background 1s ease;
+    pointer-events: none;
+    z-index: 0;
+  }
+  @keyframes glowPulse {
+    0%, 100% { transform: scale(0.98); }
+    50% { transform: scale(1.05); }
+  }
+  .mascot {
+    width: 100%;
+    height: 100%;
+    cursor: grab;
+    position: relative;
+  }
+  .mascot.dragging { cursor: grabbing; }
+  .mascot svg { width: 100%; height: 100%; display: block; overflow: visible; will-change: transform; }
+  #bodyGroup, #eyesGroup { will-change: transform; }
+  #eyesGroup { transform-box: fill-box; transform-origin: center; transition: opacity .35s ease; }
+  .eye { transform-box: fill-box; transform-origin: center; will-change: transform; }
+  #sleepEyes { opacity: 0; transition: opacity .4s ease; }
+  #app.sleeping #sleepEyes { opacity: 1; }
+  #app.sleeping #eyesGroup { opacity: 0; }
+
+  .focus-ring {
+    position: absolute;
+    top: -28px;
+    left: -28px;
+    width: 220px;
+    height: 220px;
+    pointer-events: none;
+    opacity: 0;
+    transform: rotate(-90deg);
+    transition: opacity .4s ease;
+  }
+  .focus-ring.active { opacity: 1; }
+  .focus-ring circle { fill: none; stroke-width: 3.5; }
+  .focus-ring .ring-bg { stroke: rgba(255, 255, 255, 0.12); }
+  .focus-ring .ring-fg {
+    stroke: #9ef0b8;
+    stroke-linecap: round;
+    stroke-dasharray: 628.3;
+    stroke-dashoffset: 628.3;
+    transition: stroke-dashoffset 1s linear;
+    filter: drop-shadow(0 0 6px rgba(158, 240, 184, 0.5));
+  }
+
+  .pulse {
+    position: absolute;
+    inset: 12px;
+    border-radius: 50%;
+    border: 2px solid rgba(158, 240, 184, 0.5);
+    pointer-events: none;
+    opacity: 0;
+  }
+  .mascot-wrap.listening .pulse { animation: listen 1.6s ease-out infinite; }
+  @keyframes listen {
+    0% { opacity: .55; transform: scale(.86); }
+    100% { opacity: 0; transform: scale(1.16); }
+  }
+
+  .zzz {
+    position: absolute;
+    top: 4px;
+    right: 2px;
+    width: 42px;
+    height: 60px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity .5s ease;
+  }
+  #app.sleeping .zzz { opacity: 1; }
+  .zzz span {
+    position: absolute;
+    font-size: 15px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.62);
+    opacity: 0;
+    animation: zfloat 4.4s ease-in-out infinite;
+  }
+  .zzz span:nth-child(1) { right: 0; bottom: 0; font-size: 11px; animation-delay: 0s; }
+  .zzz span:nth-child(2) { right: 8px; bottom: 14px; font-size: 14px; animation-delay: 1.1s; }
+  .zzz span:nth-child(3) { right: 15px; bottom: 30px; font-size: 17px; animation-delay: 2.2s; }
+  @keyframes zfloat {
+    0% { opacity: 0; transform: translate(0, 6px) scale(.85); }
+    30% { opacity: .9; }
+    80% { opacity: 0; transform: translate(8px, -16px) scale(1.1); }
+    100% { opacity: 0; }
+  }
+
+  #mascot.happy { animation: happy .62s cubic-bezier(.3, 1.4, .5, 1); }
+  @keyframes happy {
+    0% { transform: translateY(0) scale(1, 1); }
+    32% { transform: translateY(-16px) scale(1.05, .95); }
+    62% { transform: translateY(2px) scale(.96, 1.05); }
+    100% { transform: translateY(0) scale(1, 1); }
+  }
+
+  #app.sleeping .mascot svg { animation: floatSlow 5.4s ease-in-out infinite; }
+  @keyframes floatSlow {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-9px); }
+  }
+
+  #app.sleeping .panels {
+    opacity: 0;
+    transform: translateY(14px) scale(.94);
+    pointer-events: none;
+  }
+
+  body.perf .panel {
+    background: rgba(18, 20, 26, 0.88);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  body.perf .model-menu,
+  body.perf .thought-pop,
+  body.perf .thought-dots i {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: rgba(18, 20, 26, 0.96);
+  }
+  body.dnd .mascot-wrap,
+  body.dnd .mascot svg {
+    animation: none !important;
+    transition: none !important;
+  }
+  body.dnd .thought-dots i,
+  body.dnd .pulse,
+  body.dnd .notes span {
+    opacity: 0;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      scroll-behavior: auto !important;
+      animation-duration: .01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: .01ms !important;
+    }
+  }
+</style>
+</head>
+<body>
+  <div id="app" class="dock-right">
+    <div class="panels" id="panels">
+      <aside class="panel side hit">
+        <header class="panel-head">
+          <span class="dot"></span>
+          <div class="tabs" role="tablist" aria-label="Companion sections">
+            <button type="button" class="tab active" data-view="chat" role="tab" id="tabChat" aria-controls="viewChat" aria-selected="true" tabindex="0">chat</button>
+            <button type="button" class="tab" data-view="code" role="tab" id="tabCode" aria-controls="viewCode" aria-selected="false" tabindex="-1">code</button>
+            <button type="button" class="tab" data-view="skills" role="tab" id="tabSkills" aria-controls="viewSkills" aria-selected="false" tabindex="-1">skills</button>
+          </div>
+          <button type="button" class="icon-btn" id="settingsBtn" title="Settings" aria-label="Settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.09a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.09a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1Z"></path>
+            </svg>
+          </button>
+        </header>
+
+        <div class="views">
+          <section class="view active" id="viewChat" role="tabpanel" aria-labelledby="tabChat" tabindex="0">
+            <div class="chat-bar">
+              <span class="grow"></span>
+              <button type="button" class="model-btn" id="modelBtn" title="Choose local Ollama model">
+                <span class="model-name" id="modelName">ollama</span>
+                <span class="caret">▾</span>
+              </button>
+            </div>
+            <div class="model-menu" id="modelMenu">
+              <div class="model-scroll" id="modelList"></div>
+              <button type="button" class="model-refresh" id="modelRefresh">refresh models</button>
+            </div>
+            <div class="messages" id="messages"></div>
+            <div class="attach-strip" id="attachStrip"></div>
+            <form id="chatForm" class="chat-form" autocomplete="off">
+              <button type="button" class="round-btn" id="screenBtn" title="Capture and analyze screen" aria-label="Capture screen">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"></path>
+                  <circle cx="12" cy="12" r="2.6"></circle>
+                </svg>
+              </button>
+              <button type="button" class="round-btn" id="micBtn" title="Hold a thought, press to speak" aria-label="Voice input">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="9" y="2" width="6" height="11" rx="3"></rect>
+                  <path d="M5 11a7 7 0 0 0 14 0M12 18v4"></path>
+                </svg>
+              </button>
+              <input id="chatInput" placeholder="Ask me anything..." spellcheck="false">
+              <button type="submit" class="round-btn" aria-label="Send">↑</button>
+            </form>
+          </section>
+
+          <section class="view" id="viewSkills" role="tabpanel" aria-labelledby="tabSkills" tabindex="0">
+            <div class="skills-scroll">
+              <div class="skill-card">
+                <h3>Debug clipboard error</h3>
+                <p>Grab the error sitting in your clipboard and explain cause plus fix.</p>
+                <div class="row">
+                  <button type="button" class="mini-btn" data-skill="debug">Analyze error</button>
+                </div>
+              </div>
+
+              <div class="skill-card">
+                <h3>Code generator</h3>
+                <p>Generate a runnable snippet using your clipboard for context.</p>
+                <div class="row">
+                  <button type="button" class="mini-btn" data-skill="code-python">Python script</button>
+                  <button type="button" class="mini-btn" data-skill="code-react">React component</button>
+                  <button type="button" class="mini-btn" data-skill="code-refactor">Refactor clipboard</button>
+                </div>
+              </div>
+
+              <div class="skill-card">
+                <h3>Look at my screen</h3>
+                <p>Grab a silent screenshot of the primary display and ask me about it.</p>
+                <div class="row">
+                  <button type="button" class="mini-btn" id="screenCaptureSkill">Capture &amp; analyze screen</button>
+                </div>
+              </div>
+
+              <div class="skill-card">
+                <h3>Desktop file finder</h3>
+                <p>Search top-level Desktop files and preview suggested groups by type. Nothing is moved or created.</p>
+                <form id="desktopSearchForm" class="field">
+                  <label for="desktopSearchInput">File name contains</label>
+                  <div class="row">
+                    <input type="text" id="desktopSearchInput" maxlength="100" placeholder="Leave blank to list files" spellcheck="false">
+                    <button type="submit" class="mini-btn" id="desktopSearchButton">Find &amp; suggest</button>
+                  </div>
+                </form>
+                <div class="optimizer-note" id="desktopSearchStatus" aria-live="polite">Searches only the Desktop folder.</div>
+                <div id="desktopSearchResults"></div>
+              </div>
+
+              <div class="skill-card">
+                <h3>Media</h3>
+                <p>Control whatever is playing on this machine.</p>
+                <div class="media-row">
+                  <button type="button" class="mini-btn" data-media="prev" aria-label="Previous">Prev</button>
+                  <button type="button" class="mini-btn" data-media="playpause" id="mediaPlay" aria-label="Play or pause">Play</button>
+                  <button type="button" class="mini-btn" data-media="next" aria-label="Next">Next</button>
+                  <span class="state" id="mediaState">idle</span>
+                </div>
+              </div>
+
+              <div class="skill-card">
+                <h3>Reminder center</h3>
+                <p>Review upcoming reminders and anything that arrived late. Snooze due reminders for 10 minutes.</p>
+                <div class="optimizer-note" id="reminderCenterStatus" aria-live="polite">No scheduled reminders.</div>
+                <div id="reminderCenterList"></div>
+              </div>
+
+              <div class="skill-card">
+                <h3>Diagnostics</h3>
+                <p>Check Ollama and weather status. The selected-model test sends a short prompt and can take up to 120 seconds.</p>
+                <div class="row">
+                  <button type="button" class="mini-btn" id="diagnosticsCheck">Check setup</button>
+                  <button type="button" class="mini-btn" id="diagnosticsTestModel">Test selected model</button>
+                  <button type="button" class="mini-btn" id="diagnosticsCopy" disabled>Copy redacted report</button>
+                </div>
+                <div class="diagnostics-status" id="diagnosticsStatus" aria-live="polite">Not checked yet.</div>
+                <div id="diagnosticsList"></div>
+              </div>
+
+              <div class="skill-card">
+                <h3>Coding session</h3>
+                <p>Temporarily wear the Cyber Visor and headphones. Do Not Disturb and the focus timer stay under your control.</p>
+                <div class="row">
+                  <button type="button" class="mini-btn" id="codingSessionToggle" aria-pressed="false">Start coding session</button>
+                </div>
+                <div class="optimizer-note" id="codingSessionStatus" aria-live="polite">Session is off.</div>
+              </div>
+
+              <div class="skill-card">
+                <h3>CPU optimizer</h3>
+                <p>Review a five-sample CPU average and memory use. Nothing closes until you select processes and confirm.</p>
+                <div class="row">
+                  <button type="button" class="mini-btn" id="cpuScan" data-skill="cpu-optimizer">Scan CPU usage</button>
+                  <button type="button" class="mini-btn" id="cpuClean">Close selected</button>
+                </div>
+                <div class="optimizer-note" id="cpuSampleStatus" aria-live="polite">CPU sampling starts when you scan.</div>
+                <div id="cpuList"></div>
+              </div>
+
+              <div class="skill-card">
+                <h3>RAM optimizer</h3>
+                <p>Top processes by memory use. Review each one before closing.</p>
+                <div class="row">
+                  <button type="button" class="mini-btn" id="ramRefresh">Refresh list</button>
+                  <button type="button" class="mini-btn" id="ramClean">Close selected</button>
+                </div>
+                <div id="ramList"></div>
+              </div>
+
+              <div class="skill-card">
+                <h3>Focus timer</h3>
+                <p>A 25 minute sprint with the ring drawn around me.</p>
+                <div class="focus-line">
+                  <span class="time" id="focusTime">25:00</span>
+                  <button type="button" class="mini-btn" id="focusBtn">Start</button>
+                </div>
+              </div>
+
+              <div class="skill-card">
+                <h3>Clipboard history</h3>
+                <p>Last five things you copied.</p>
+                <div id="clipList"></div>
+              </div>
+
+              <div class="skill-card">
+                <h3>Quick launch</h3>
+                <p>Open frequently used tools in one click.</p>
+                <div class="row">
+                  <button type="button" class="mini-btn" data-launch="terminal">Terminal</button>
+                  <button type="button" class="mini-btn" data-launch="vscode">VS Code</button>
+                  <button type="button" class="mini-btn" data-launch="localhost">localhost</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="view" id="viewCode" role="tabpanel" aria-labelledby="tabCode" tabindex="0">
+            <div class="skills-scroll">
+              <div class="skill-card">
+                <h3>Coding agent</h3>
+                <p>Only works in the workspace you select. File context goes to your configured AI provider. Review every proposed edit before applying.</p>
+                <div class="row">
+                  <button type="button" class="mini-btn" id="workspaceSelect">Choose workspace</button>
+                  <button type="button" class="mini-btn" id="workspaceClear">Clear workspace</button>
+                  <button type="button" class="mini-btn" id="workspaceRefresh">Refresh files</button>
+                </div>
+                <div class="optimizer-note" id="workspacePath" aria-live="polite">No workspace selected.</div>
+                <div class="field">
+                  <p class="optimizer-note">Read-only Git view: staged and unstaged diffs are shown; untracked files appear in status only. CyberMascot will not stage or commit changes.</p>
+                  <div class="row">
+                    <button type="button" class="mini-btn" id="workspaceGitRefresh">Review Git changes</button>
+                  </div>
+                  <div class="optimizer-note" id="workspaceGitStatus" aria-live="polite">Git status has not been checked.</div>
+                  <pre id="workspaceGitDiff" class="command-output hidden"></pre>
+                </div>
+                <div class="field">
+                  <label for="workspaceFileSearch">Find project files</label>
+                  <input type="text" id="workspaceFileSearch" maxlength="100" placeholder="Filter by file path" spellcheck="false">
+                </div>
+                <div id="workspaceFileList"></div>
+                <form id="workspaceCodeSearchForm" class="field">
+                  <label for="workspaceCodeSearch">Search file contents</label>
+                  <div class="row">
+                    <input type="text" id="workspaceCodeSearch" maxlength="120" placeholder="At least 2 characters" spellcheck="false">
+                    <button type="submit" class="mini-btn" id="workspaceCodeSearchButton">Search code</button>
+                  </div>
+                </form>
+                <div id="workspaceCodeSearchResults"></div>
+                <div class="optimizer-note" id="workspaceContextStatus">No files added to context.</div>
+                <div class="field">
+                  <label for="codingAgentTask">What should I help with?</label>
+                  <textarea id="codingAgentTask" rows="3" maxlength="4000" placeholder="Describe a bug, ask about the project, or request a focused change across up to 5 selected files."></textarea>
+                </div>
+                <div class="row">
+                  <button type="button" class="mini-btn" id="codingAgentAsk">Ask about project</button>
+                  <button type="button" class="mini-btn" id="codingAgentPropose" disabled>Propose edits to selected files</button>
+                </div>
+                <div class="diagnostics-status" id="codingAgentStatus" aria-live="polite">Select a workspace to begin.</div>
+                <div class="md" id="codingAgentAnswer"></div>
+                <div id="codingEditProposal" class="coding-proposal hidden">
+                  <div class="optimizer-note" id="codingEditPath"></div>
+                  <div id="codingEditDiffs"></div>
+                  <div class="row">
+                    <button type="button" class="mini-btn" id="codingEditApply">Apply reviewed changes</button>
+                    <button type="button" class="mini-btn" id="codingEditDiscard">Discard proposal</button>
+                    <button type="button" class="mini-btn" id="codingEditUndo" disabled>Undo last edit</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="skill-card">
+                <h3>Run a project check</h3>
+                <p>Commands run in the selected workspace. CyberMascot asks you to confirm each command first; only test/build checks are allowed.</p>
+                <form id="codingCheckForm" class="field">
+                  <label for="codingCheckCommand">Allowed commands: npm test/run test, lint, build, check, typecheck; node --test; pytest; dotnet test; cargo test; go test</label>
+                  <div class="row">
+                    <input type="text" id="codingCheckCommand" maxlength="250" placeholder="npm test" spellcheck="false">
+                    <button type="submit" class="mini-btn" id="codingCheckRun">Review &amp; run</button>
+                  </div>
+                </form>
+                <div class="diagnostics-status" id="codingCheckStatus" aria-live="polite">No command run.</div>
+                <pre id="codingCheckOutput" class="command-output hidden"></pre>
+              </div>
+
+              <div class="skill-card">
+                <h3>Follow-up sessions</h3>
+                <p>Manually log progress from GPT, Claude, GitHub, or another tool. CyberMascot does not read those conversations automatically.</p>
+                <form id="codingSessionForm" class="field">
+                  <label for="codingSessionPlatform">Platform</label>
+                  <select id="codingSessionPlatform">
+                    <option>GPT</option>
+                    <option>Claude</option>
+                    <option>GitHub</option>
+                    <option>Other</option>
+                  </select>
+                  <label for="codingSessionTitle">Session name</label>
+                  <input type="text" id="codingSessionTitle" maxlength="120" placeholder="e.g. Build authentication flow" spellcheck="false">
+                  <label for="codingSessionGoal">Goal (optional)</label>
+                  <input type="text" id="codingSessionGoal" maxlength="2000" placeholder="What are you trying to finish?" spellcheck="false">
+                  <button type="submit" class="mini-btn">Start tracking session</button>
+                </form>
+                <div class="field">
+                  <label for="codingSessionSelect">Active and recent sessions</label>
+                  <select id="codingSessionSelect"></select>
+                </div>
+                <div class="optimizer-note" id="codingSessionProjectStatus" aria-live="polite">No project session selected.</div>
+                <div class="optimizer-note" id="codingSessionGitStatus" aria-live="polite">Git status is not checked.</div>
+                <div class="row">
+                  <button type="button" class="mini-btn" id="codingSessionResume" disabled>Resume session workspace</button>
+                  <button type="button" class="mini-btn" id="codingSessionGitRefresh" disabled>Refresh session Git status</button>
+                </div>
+                <div id="codingSessionNotes"></div>
+                <form id="codingSessionNoteForm" class="field">
+                  <label for="codingSessionNote">Add progress note or link</label>
+                  <textarea id="codingSessionNote" rows="2" maxlength="4000" placeholder="Paste a summary, decision, blocker, or link you want to remember."></textarea>
+                  <button type="submit" class="mini-btn">Save note</button>
+                </form>
+                <div class="row">
+                  <button type="button" class="mini-btn" id="codingSessionFollowUp">Summarize &amp; suggest next steps</button>
+                  <button type="button" class="mini-btn" id="codingSessionFinish">Finish session</button>
+                </div>
+                <div class="diagnostics-status" id="codingSessionFollowUpResult" aria-live="polite"></div>
+                <div class="md" id="codingSessionSummary"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="view" id="viewSettings" role="region" aria-labelledby="settingsBtn" tabindex="0">
+            <div class="settings-scroll">
+              <div class="field">
+                <label for="setIdle">Idle sleep</label>
+                <select id="setIdle">
+                  <option value="0">Never</option>
+                  <option value="1">1 minute</option>
+                  <option value="3">3 minutes</option>
+                  <option value="5">5 minutes</option>
+                  <option value="15">15 minutes</option>
+                </select>
+              </div>
+
+              <div class="field">
+                <label for="setCity">Weather city fallback</label>
+                <input type="text" id="setCity" placeholder="Nairobi" spellcheck="false">
+              </div>
+
+              <div class="field">
+                <label class="toggle"><input type="checkbox" id="setWeatherLocation"> Use device location</label>
+                <div class="settings-note">Windows location services may be used. Coordinates go to Open-Meteo; saved city is the fallback.</div>
+              </div>
+
+              <div class="field">
+                <label for="setUnit">Temperature unit</label>
+                <select id="setUnit">
+                  <option value="C">Celsius</option>
+                  <option value="F">Fahrenheit</option>
+                </select>
+              </div>
+
+              <div class="field">
+                <label for="setProvider">AI provider</label>
+                <select id="setProvider">
+                  <option value="ollama">Ollama (local)</option>
+                  <option value="gemini">Google Gemini</option>
+                  <option value="openai">OpenAI compatible</option>
+                </select>
+              </div>
+
+              <div class="field">
+                <label for="setBaseUrl">Base URL</label>
+                <input type="text" id="setBaseUrl" placeholder="https://generativelanguage.googleapis.com/v1beta/openai" spellcheck="false">
+              </div>
+
+              <div class="field" id="ollamaUrlField">
+                <label for="setOllamaUrl">Ollama URL</label>
+                <input type="text" id="setOllamaUrl" value="http://127.0.0.1:11434" placeholder="http://127.0.0.1:11434" spellcheck="false">
+              </div>
+
+              <div class="field">
+                <label for="setModel">Model</label>
+                <input type="text" id="setModel" placeholder="gemini-2.5-flash" spellcheck="false">
+              </div>
+
+              <div class="field">
+                <label for="setKey">API key</label>
+                <input type="password" id="setKey" placeholder="stored locally, optional">
+              </div>
+
+              <label class="toggle"><input type="checkbox" id="setTop"> Always on top</label>
+              <label class="toggle"><input type="checkbox" id="setLogin"> Start CyberMascot when I sign in to Windows</label>
+              <p class="optimizer-note" id="loginStartupStatus" aria-live="polite">When enabled, CyberMascot opens after you sign in to Windows. This does not create or manage a CyberMascot account.</p>
+              <label class="toggle"><input type="checkbox" id="setNotify"> Notifications</label>
+              <label class="toggle"><input type="checkbox" id="setPerf"> Performance mode (lighter glass)</label>
+              <label class="toggle"><input type="checkbox" id="setDnd"> Do Not Disturb (pause animations)</label>
+
+              <div class="field">
+                <label for="setHumorLevel">Humor level</label>
+                <select id="setHumorLevel">
+                  <option value="low">Low · subtle</option>
+                  <option value="medium">Medium · playful</option>
+                  <option value="high">High · extra witty</option>
+                </select>
+              </div>
+              <label class="toggle"><input type="checkbox" id="setUseEmojis"> Use emojis in casual replies</label>
+              <p class="optimizer-note">CyberMascot keeps serious and technical answers focused, whatever humor level you choose.</p>
+
+              <button type="button" class="mini-btn danger wide" id="clearMemory">Clear conversation memory</button>
+
+              <div class="field">
+                <label for="setAccessory">Appearance &amp; accessories</label>
+                <select id="setAccessory">
+                  <option value="classic">Classic Minimal</option>
+                  <option value="visor">Cyber Visor</option>
+                  <option value="wizard">Coding Wizard Hat</option>
+                  <option value="coffee">Coffee Mug (Morning)</option>
+                  <option value="headphones">Headphones (locked on)</option>
+                </select>
+              </div>
+
+              <div class="field">
+                <label for="setClock">Local time</label>
+                <select id="setClock">
+                  <option value="24">24-hour clock</option>
+                  <option value="12">12-hour clock</option>
+                  <option value="off">Hidden</option>
+                </select>
+              </div>
+
+              <div class="field">
+                <label for="setOpacity">Glass opacity</label>
+                <input type="range" id="setOpacity" min="20" max="100" step="5">
+              </div>
+
+              <div class="settings-note" id="settingsNote">Settings save automatically.</div>
+            </div>
+          </section>
+        </div>
+      </aside>
+
+      <section class="panel bubble hit">
+        <div class="bubble-head">
+          <h1 id="greeting">Hello, Dellon</h1>
+          <p id="dateLine"></p>
+          <div class="clock" id="clock">--:--</div>
+        </div>
+
+        <div class="weather-row">
+          <div class="wx-icon" id="wxIcon"></div>
+          <div>
+            <div class="wx-temp" id="wxTemp">--°</div>
+            <div class="wx-sub" id="wxSub">checking the sky...</div>
+          </div>
+        </div>
+
+        <div class="section-label">
+          <span>tasks</span>
+          <em id="taskCount">0</em>
+        </div>
+        <ul class="task-list" id="taskList"></ul>
+        <form class="quick-add" id="taskForm" autocomplete="off">
+          <div class="quick-add-row">
+            <input id="taskInput" placeholder="quick add a task..." spellcheck="false">
+            <button type="submit" aria-label="Add task">+</button>
+          </div>
+          <label class="task-reminder-field" for="taskReminder">
+            <span title="The reminder date sets the planned day. Without a reminder, the task is planned for its creation day. CyberMascot must be running for an on-time alert.">One-time reminder (optional, local time)</span>
+            <input id="taskReminder" type="datetime-local">
+          </label>
+        </form>
+
+        <div class="metrics" id="metrics"></div>
+
+        <div class="thought-dots" aria-hidden="true"><i></i><i></i><i></i></div>
+      </section>
+    </div>
+
+    <div class="mascot-wrap" id="mascotWrap">
+      <svg class="focus-ring" id="focusRing" viewBox="0 0 220 220" aria-hidden="true">
+        <circle class="ring-bg" cx="110" cy="110" r="100"></circle>
+        <circle class="ring-fg" id="ringFg" cx="110" cy="110" r="100"></circle>
+      </svg>
+      <div class="pulse" aria-hidden="true"></div>
+
+      <div class="notes" aria-hidden="true"><span>♪</span><span>♫</span><span>♪</span></div>
+      <div class="mascot hit" id="mascot">
+        <svg viewBox="0 0 400 400" role="img" aria-label="CyberMascot">
+          <g id="bodyGroup">
+            <rect x="90" y="106" width="220" height="188" rx="86" ry="86" fill="#ffffff"/>
+            <g id="eyesGroup">
+              <rect class="eye" id="eyeL" x="160" y="170" width="26" height="62" rx="14" ry="14" fill="#000000"/>
+              <rect class="eye" id="eyeR" x="224" y="170" width="26" height="62" rx="14" ry="14" fill="#000000"/>
+            </g>
+            <g id="sleepEyes" fill="none" stroke="#000000" stroke-width="9" stroke-linecap="round">
+              <path d="M152 186 q22 18 44 0"/>
+              <path d="M216 186 q22 18 44 0"/>
+            </g>
+            <g id="accVisor">
+              <rect x="140" y="158" width="146" height="74" rx="20" fill="#101a24" opacity="0.94"/>
+              <rect x="148" y="168" width="130" height="44" rx="13" fill="rgba(120, 225, 255, 0.26)"/>
+              <rect x="148" y="168" width="130" height="12" rx="6" fill="rgba(190, 245, 255, 0.34)"/>
+            </g>
+
+            <g id="accHat">
+              <path d="M200 22 L248 108 L152 108 Z" fill="#2b2140"/>
+              <path d="M200 22 L222 108 L178 108 Z" fill="#352a4f"/>
+              <path d="M138 108 Q200 92 262 108 Q200 124 138 108 Z" fill="#3a2c56"/>
+              <circle cx="205" cy="58" r="4" fill="#c8b6ff" opacity="0.9"/>
+              <circle cx="188" cy="82" r="3" fill="#c8b6ff" opacity="0.7"/>
+              <path d="M186 104 h28 v12 h-28 z" fill="#5a4a7a"/>
+            </g>
+
+            <g id="accMug">
+              <path d="M286 250 q20 6 0 20" stroke="#e6e0d6" stroke-width="7" fill="none" stroke-linecap="round"/>
+              <rect x="256" y="238" width="32" height="38" rx="8" fill="#e6e0d6"/>
+              <ellipse cx="272" cy="239" rx="16" ry="5" fill="#5a3a22"/>
+              <g stroke="rgba(255,255,255,0.55)" stroke-width="2.4" fill="none" stroke-linecap="round">
+                <path d="M264 228 q4-8 0-16"/>
+                <path d="M274 228 q4-8 0-16"/>
+              </g>
+            </g>
+
+            <g id="accHeadphones">
+              <path d="M96 198 C96 96 304 96 304 198" stroke="#23242c" stroke-width="15" fill="none" stroke-linecap="round"/>
+              <rect x="72" y="180" width="36" height="66" rx="17" fill="#23242c"/>
+              <rect x="292" y="180" width="36" height="66" rx="17" fill="#23242c"/>
+              <rect x="79" y="189" width="11" height="48" rx="5.5" fill="#4d5270"/>
+              <rect x="299" y="189" width="11" height="48" rx="5.5" fill="#4d5270"/>
+            </g>
+          </g>
+        </svg>
+        <div class="zzz" aria-hidden="true"><span>z</span><span>z</span><span>z</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="thought-pop" id="thoughtPop" role="status" aria-live="polite"></div>
+  <div class="click-through-indicator hidden" id="clickThroughIndicator" role="status" aria-live="polite">
+    Desktop click-through on · Ctrl+Shift+X to turn off
+  </div>
+
+<script src="vendor/marked.js"></script>
+<script src="vendor/purify.js"></script>
+<script src="vendor/prism.js"></script>
+<script src="vendor/prism-python.js"></script>
+<script src="vendor/prism-typescript.js"></script>
+<script src="vendor/prism-jsx.js"></script>
+<script src="renderer.js"></script>
+</body>
+</html>

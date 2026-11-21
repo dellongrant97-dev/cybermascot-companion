@@ -1,0 +1,61 @@
+{
+  "name": "cybermascot-companion",
+  "version": "1.0.3",
+  "description": "Transparent always-on-top desktop companion mascot",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test",
+    "pack:win": "electron-builder --win dir --x64",
+    "dist:win": "electron-builder --win nsis --x64",
+    "autostart:on": "electron . --setup-autostart",
+    "autostart:off": "electron . --remove-autostart"
+  },
+  "author": "Dellon",
+  "license": "MIT",
+  "devDependencies": {
+    "chrome-remote-interface": "^0.34.0",
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0"
+  },
+  "dependencies": {
+    "dompurify": "^3.4.18",
+    "marked": "^18.2.1",
+    "prismjs": "^1.30.0",
+    "systeminformation": "^5.23.5"
+  },
+  "build": {
+    "appId": "com.cybermascot.companion",
+    "productName": "CyberMascot Companion",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer.js",
+      "renderer.html",
+      "icon.png",
+      "vendor/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}
