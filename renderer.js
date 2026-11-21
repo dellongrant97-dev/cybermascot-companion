@@ -4,6 +4,7 @@ const appEl = document.getElementById('app');
 const panelsEl = document.getElementById('panels');
 const mascotEl = document.getElementById('mascot');
 const mascotWrap = document.getElementById('mascotWrap');
+const mascotStatus = document.getElementById('mascotStatus');
 const bodyGroup = document.getElementById('bodyGroup');
 const eyesGroup = document.getElementById('eyesGroup');
 const eyeL = document.getElementById('eyeL');
@@ -104,6 +105,12 @@ const codingSessionSummary = document.getElementById('codingSessionSummary');
 const reminderCenterStatus = document.getElementById('reminderCenterStatus');
 const reminderCenterList = document.getElementById('reminderCenterList');
 const clipList = document.getElementById('clipList');
+const clearClipboardHistory = document.getElementById('clearClipboardHistory');
+const clipboardHistoryStatus = document.getElementById('clipboardHistoryStatus');
+const setClipboardHistoryPaused = document.getElementById('setClipboardHistoryPaused');
+const setClipboardRetention = document.getElementById('setClipboardRetention');
+const setCpuWarningThreshold = document.getElementById('setCpuWarningThreshold');
+const setMemoryWarningThreshold = document.getElementById('setMemoryWarningThreshold');
 const settingsNote = document.getElementById('settingsNote');
 const thoughtPop = document.getElementById('thoughtPop');
 const clickThroughIndicator = document.getElementById('clickThroughIndicator');
@@ -130,17 +137,19 @@ const appState = {
   model: '',
   baseUrl: '',
   ollamaUrl: 'http://127.0.0.1:11434',
-  settings: { idleMinutes: 3, unit: 'C', alwaysOnTop: true, launchAtLogin: true, opacity: 0.55, notifications: true, clock: '24', accessory: 'classic', performance: false, humorLevel: 'medium', useEmojis: true },
+  settings: { idleMinutes: 3, unit: 'C', alwaysOnTop: true, launchAtLogin: true, opacity: 0.55, notifications: true, clock: '24', accessory: 'classic', performance: false, humorLevel: 'medium', useEmojis: true, cpuWarningThreshold: 90, memoryWarningThreshold: 90, clipboardHistoryPaused: false, clipboardRetentionDays: 0 },
   weather: null,
   weatherLocationEnabled: true,
   clipboard: [],
   workspacePath: '',
-  autostartError: ''
+  autostartError: '',
+  keyStorageError: ''
 };
 const chatHistory = [];
 let lastMetrics = null;
 let highSince = 0;
 let highNotifiedAt = 0;
+let highSignature = '';
 let lastDiagnosticsReport = '';
 let cpuLoadPromise = null;
 let codingSessionActive = false;
@@ -181,6 +190,7 @@ let idle = 0;
 let lastSignificant = performance.now();
 let lastN = { nx: 0, ny: 0 };
 let pointerDown = false;
+let mascotPointerStart = null;
 let lastHit = null;
 
 const clampNum = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
@@ -818,6 +828,17 @@ function renderMarkdown(text) {
   return div;
 }
 
+messagesEl.addEventListener('click', (event) => {
+  const anchor = event.target && event.target.closest ? event.target.closest('a') : null;
+  if (!anchor) return;
+  event.preventDefault();
+  api.openExternal(anchor.href).then((result) => {
+    if (!result || !result.ok) showThought((result && result.error) || 'Could not open that link.');
+  }).catch((error) => {
+    showThought(`Could not open that link: ${String((error && error.message) || error)}`);
+  });
+});
+
 function decorateCode(root) {
   root.querySelectorAll('pre > code').forEach((codeEl) => {
     const cls = Array.from(codeEl.classList).find((c) => c.startsWith('language-'));
@@ -902,9 +923,15 @@ async function requestReply(image) {
   noteActivity();
   const typing = showTyping();
   setThinking(true);
-  const result = await api.chat(chatHistory.slice(-16), image || '');
-  typing.remove();
-  setThinking(false);
+  let result;
+  try {
+    result = await api.chat(chatHistory.slice(-16), image || '');
+  } catch (error) {
+    result = { ok: false, error: String((error && error.message) || error) };
+  } finally {
+    typing.remove();
+    setThinking(false);
+  }
 
   if (result.ok && result.reply) {
     const content = result.reply.trim();
@@ -912,6 +939,7 @@ async function requestReply(image) {
     chatHistory.push({ role: 'assistant', content });
     api.appendHistory({ role: 'assistant', content });
     renderMarkdown(content);
+    setMascotState('speaking', 1800);
     return;
   }
   const provider = appState.provider === 'openai'
@@ -1368,16 +1396,19 @@ codingAgentAsk.addEventListener('click', async () => {
   codingAgentAsk.disabled = true;
   codingAgentStatus.textContent = 'Reviewing the selected context…';
   codingAgentAnswer.textContent = '';
+  setMascotState('working');
   try {
     const context = Array.from(workspaceContext, ([filePath, content]) => `File: ${filePath}\n\`\`\`\n${content}\n\`\`\``).join('\n\n');
     const result = await api.askCodingAgent({ task, context });
     if (!result || !result.ok) throw new Error((result && result.error) || 'Unknown error');
     codingAgentAnswer.textContent = result.reply;
     codingAgentStatus.textContent = `Answered using ${workspaceContext.size} selected file${workspaceContext.size === 1 ? '' : 's'}.`;
+    setMascotState('speaking', 1800);
   } catch (err) {
     codingAgentStatus.textContent = `Coding agent failed: ${String((err && err.message) || err)}`;
   } finally {
     codingAgentAsk.disabled = false;
+    if (mascotState === 'working') restoreMascotState();
   }
 });
 
@@ -1390,6 +1421,7 @@ codingAgentPropose.addEventListener('click', async () => {
   if (!confirmProviderContext('Send this edit request and the current contents of these files to the configured AI provider?', Array.from(selectedEditPaths))) return;
   codingAgentPropose.disabled = true;
   codingAgentStatus.textContent = `Preparing a reviewable proposal for ${selectedEditPaths.size} file${selectedEditPaths.size === 1 ? '' : 's'}…`;
+  setMascotState('working');
   try {
     const result = await api.proposeCodeEdit({ paths: Array.from(selectedEditPaths), instruction });
     if (!result || !result.ok) throw new Error((result && result.error) || 'Unknown error');
@@ -1423,6 +1455,7 @@ codingAgentPropose.addEventListener('click', async () => {
     codingAgentStatus.textContent = `Could not create edit proposal: ${String((err && err.message) || err)}`;
   } finally {
     updateWorkspaceContextStatus();
+    if (mascotState === 'working') restoreMascotState();
   }
 });
 
@@ -1436,13 +1469,14 @@ codingEditDiscard.addEventListener('click', () => {
 
 codingEditApply.addEventListener('click', async () => {
   if (!currentEditProposal) return;
-  const edits = currentEditProposal.edits.filter((edit) => edit.original !== edit.content);
-  const paths = edits.map((edit) => edit.path);
-  const confirmed = window.confirm(`Apply the reviewed changes to ${paths.length} file${paths.length === 1 ? '' : 's'}?\n\n${paths.join('\n')}\n\nBackups will be kept so you can undo the group.`);
-  if (!confirmed) return;
   codingEditApply.disabled = true;
+  setMascotState('working');
   try {
-    const result = await api.applyCodeEdit({ edits });
+    const result = await api.applyCodeEdit({ proposalId: currentEditProposal.proposalId });
+    if (result && result.cancelled) {
+      codingAgentStatus.textContent = 'Applying the edit was cancelled; no file was changed.';
+      return;
+    }
     if (result && result.partial) {
       lastCodingUndoId = result.undoId || '';
       codingEditUndo.disabled = !lastCodingUndoId;
@@ -1466,16 +1500,21 @@ codingEditApply.addEventListener('click', async () => {
     codingAgentStatus.textContent = `Could not apply edit: ${String((err && err.message) || err)}`;
   } finally {
     codingEditApply.disabled = false;
+    if (mascotState === 'working') restoreMascotState();
   }
 });
 
 codingEditUndo.addEventListener('click', async () => {
   if (!lastCodingUndoId) return;
-  const confirmed = window.confirm('Restore the original file or files from the saved backup?');
-  if (!confirmed) return;
   codingEditUndo.disabled = true;
+  setMascotState('working');
   try {
     const result = await api.undoCodeEdit(lastCodingUndoId);
+    if (result && result.cancelled) {
+      codingAgentStatus.textContent = 'Undo was cancelled; no file was restored.';
+      codingEditUndo.disabled = false;
+      return;
+    }
     if (result && result.partial) {
       lastCodingUndoId = result.undoId || '';
       codingEditUndo.disabled = !lastCodingUndoId;
@@ -1493,6 +1532,8 @@ codingEditUndo.addEventListener('click', async () => {
   } catch (err) {
     codingAgentStatus.textContent = `Could not undo edit: ${String((err && err.message) || err)}`;
     codingEditUndo.disabled = false;
+  } finally {
+    if (mascotState === 'working') restoreMascotState();
   }
 });
 
@@ -1504,13 +1545,18 @@ codingCheckForm.addEventListener('submit', async (event) => {
   }
   const command = codingCheckCommand.value.trim();
   if (!command) return;
-  if (!window.confirm(`Run this check in the selected workspace?\n\n${command}\n\nCommands run with your Windows account permissions. Review the command carefully.`)) return;
   codingCheckRun.disabled = true;
   codingCheckStatus.textContent = 'Running check… (up to 120 seconds)';
   codingCheckOutput.classList.remove('hidden');
   codingCheckOutput.textContent = '';
+  setMascotState('working');
   try {
     const result = await api.runCodingCheck({ command });
+    if (result && result.cancelled) {
+      codingCheckStatus.textContent = 'Run cancelled; no check was started.';
+      codingCheckOutput.textContent = '(No command was run.)';
+      return;
+    }
     if (result && result.timedOut) {
       codingCheckStatus.textContent = result.error;
     } else if (!result || !result.command) {
@@ -1521,6 +1567,8 @@ codingCheckForm.addEventListener('submit', async (event) => {
     codingCheckOutput.textContent = [
       result.stdout ? `STDOUT:\n${result.stdout}` : '',
       result.stderr ? `STDERR:\n${result.stderr}` : '',
+      result.stdoutTruncated ? '[STDOUT truncated at 40,000 bytes]' : '',
+      result.stderrTruncated ? '[STDERR truncated at 40,000 bytes]' : '',
       result.error || ''
     ].filter(Boolean).join('\n\n') || '(No output)';
     if (result.historyWarning) codingCheckStatus.textContent += ` · ${result.historyWarning}`;
@@ -1529,6 +1577,7 @@ codingCheckForm.addEventListener('submit', async (event) => {
     codingCheckStatus.textContent = `Check failed: ${String((err && err.message) || err)}`;
   } finally {
     codingCheckRun.disabled = false;
+    if (mascotState === 'working') restoreMascotState();
   }
 });
 
@@ -1930,19 +1979,35 @@ mascotEl.addEventListener('pointerdown', (e) => {
     return;
   }
   pointerDown = true;
+  mascotPointerStart = { x: e.clientX, y: e.clientY };
   api.dragStart();
 });
 
-const endPointer = () => {
+const endPointer = (event) => {
   if (!pointerDown) return;
   pointerDown = false;
   api.dragEnd();
   mascotEl.classList.remove('dragging');
+  const start = mascotPointerStart;
+  mascotPointerStart = null;
+  if (event && event.type === 'pointerup' && start &&
+      Math.hypot(event.clientX - start.x, event.clientY - start.y) < 6) {
+    noteActivity();
+    bounce();
+  }
 };
 
 window.addEventListener('pointerup', endPointer);
 window.addEventListener('pointercancel', endPointer);
 window.addEventListener('blur', endPointer);
+
+mascotEl.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  event.preventDefault();
+  noteActivity();
+  if (sleeping) api.wake();
+  else bounce();
+});
 
 mascotEl.addEventListener('contextmenu', (e) => {
   e.preventDefault();
@@ -2121,6 +2186,8 @@ function setListening(on) {
   mascotWrap.classList.toggle('listening', on);
   micBtn.classList.toggle('listening', on);
   micBtn.title = on ? 'Listening... click to stop' : 'Press to speak';
+  if (on) setMascotState('listening');
+  else if (mascotState === 'listening') restoreMascotState();
 }
 
 if (speechApi) {
@@ -2301,16 +2368,21 @@ async function loadProcessList(listEl, sortBy) {
 }
 
 function loadRam() {
-  return loadProcessList(ramList, 'memory');
+  setMascotState('working');
+  return loadProcessList(ramList, 'memory').finally(() => {
+    if (mascotState === 'working') restoreMascotState();
+  });
 }
 
 function loadCpu() {
   if (cpuLoadPromise) return cpuLoadPromise;
   cpuScan.disabled = true;
+  setMascotState('working');
   cpuLoadPromise = loadProcessList(cpuList, 'cpu-average');
   return cpuLoadPromise.finally(() => {
     cpuLoadPromise = null;
     cpuScan.disabled = false;
+    if (mascotState === 'working') restoreMascotState();
   });
 }
 
@@ -2558,6 +2630,13 @@ function syncSettingsForm() {
       ? 'Enabled: CyberMascot opens after you sign in to Windows. This does not create or manage a CyberMascot account.'
       : 'Disabled: CyberMascot will not open automatically when you sign in.');
   setNotify.checked = s.notifications !== false;
+  setCpuWarningThreshold.value = String(s.cpuWarningThreshold || 90);
+  setMemoryWarningThreshold.value = String(s.memoryWarningThreshold || 90);
+  setClipboardHistoryPaused.checked = Boolean(s.clipboardHistoryPaused);
+  setClipboardRetention.value = String(Number.isFinite(s.clipboardRetentionDays) ? s.clipboardRetentionDays : 0);
+  clipboardHistoryStatus.textContent = s.clipboardHistoryPaused
+    ? 'Paused: new clipboard text is not added to history.'
+    : 'Clipboard history is stored locally in the app configuration.';
   setPerf.checked = Boolean(s.performance);
   setDnd.checked = Boolean(s.dnd);
   document.getElementById('setHumorLevel').value = ['low', 'medium', 'high'].includes(s.humorLevel) ? s.humorLevel : 'medium';
@@ -2584,7 +2663,13 @@ function flashNote(text) {
 }
 
 async function saveSettings(patch) {
-  const res = await api.setSettings(patch);
+  let res;
+  try {
+    res = await api.setSettings(patch);
+  } catch (error) {
+    flashNote(`Could not save settings: ${String((error && error.message) || error)}`);
+    return null;
+  }
   if (!res) return;
   if (res.ok === false) {
     flashNote(res.error || 'Could not save settings.');
@@ -2598,12 +2683,13 @@ async function saveSettings(patch) {
   appState.weatherLocationEnabled = res.weatherLocationEnabled !== false;
   appState.city = res.weatherCity || appState.city;
   appState.weather = res.weather || appState.weather;
+  appState.keyStorageError = res.keyStorageError || '';
   renderWeather();
   updateModelLabel();
   document.body.style.setProperty('--glass', String(appState.settings.opacity));
   document.body.classList.toggle('perf', Boolean(appState.settings.performance));
   applyAccessory(appState.settings.accessory);
-  flashNote('Saved.');
+  flashNote(appState.keyStorageError || 'Saved.');
   return res;
 }
 
@@ -2667,8 +2753,9 @@ document.getElementById('setKey').addEventListener('change', (e) => {
   const value = e.target.value.trim();
   if (!value) return;
   e.target.value = '';
-  saveSettings({ chat: { apiKey: value } });
-  flashNote('API key saved locally.');
+  saveSettings({ chat: { apiKey: value } }).then((result) => {
+    if (result) flashNote('API key saved encrypted for this Windows account.');
+  });
 });
 
 document.getElementById('setTop').addEventListener('change', (e) => {
@@ -2706,6 +2793,50 @@ document.getElementById('setLogin').addEventListener('change', async (event) => 
 
 setNotify.addEventListener('change', (e) => {
   saveSettings({ settings: { notifications: e.target.checked } });
+});
+
+setCpuWarningThreshold.addEventListener('change', (event) => {
+  saveSettings({ settings: { cpuWarningThreshold: Number(event.target.value) } });
+});
+
+setMemoryWarningThreshold.addEventListener('change', (event) => {
+  saveSettings({ settings: { memoryWarningThreshold: Number(event.target.value) } });
+});
+
+setClipboardHistoryPaused.addEventListener('change', async (event) => {
+  const result = await saveSettings({ settings: { clipboardHistoryPaused: event.target.checked } });
+  if (!result) {
+    event.target.checked = Boolean(appState.settings.clipboardHistoryPaused);
+    return;
+  }
+  clipboardHistoryStatus.textContent = event.target.checked
+    ? 'Paused: new clipboard text is not added to history.'
+    : 'Active: new clipboard text will be added to history.';
+});
+
+setClipboardRetention.addEventListener('change', (event) => {
+  saveSettings({ settings: { clipboardRetentionDays: Number(event.target.value) } });
+});
+
+clearClipboardHistory.addEventListener('click', async () => {
+  clearClipboardHistory.disabled = true;
+  clipboardHistoryStatus.textContent = 'Waiting for confirmation…';
+  try {
+    const result = await api.clipboardClearHistory();
+    if (result && result.ok) {
+      appState.clipboard = result.clipboard || [];
+      renderClips();
+      clipboardHistoryStatus.textContent = 'Clipboard history cleared.';
+    } else if (result && result.cancelled) {
+      clipboardHistoryStatus.textContent = 'Clipboard history was not changed.';
+    } else {
+      throw new Error((result && result.error) || 'Could not clear clipboard history.');
+    }
+  } catch (error) {
+    clipboardHistoryStatus.textContent = `Could not clear clipboard history: ${String((error && error.message) || error)}`;
+  } finally {
+    clearClipboardHistory.disabled = false;
+  }
 });
 
 setDnd.addEventListener('change', (e) => {
@@ -2769,6 +2900,35 @@ function setThinking(on) {
   thinkingActive = Boolean(on);
   mascotWrap.classList.toggle('thinking', thinkingActive);
   if (dotsEl) dotsEl.classList.toggle('thinking', thinkingActive);
+  if (thinkingActive) setMascotState('thinking');
+  else if (mascotState === 'thinking') restoreMascotState();
+}
+
+let mascotState = 'idle';
+let mascotStateTimer = null;
+const mascotStates = ['idle', 'listening', 'thinking', 'speaking', 'working'];
+
+function setMascotState(state, duration = 0) {
+  if (!mascotStates.includes(state)) return;
+  clearTimeout(mascotStateTimer);
+  mascotStateTimer = null;
+  mascotState = state;
+  mascotWrap.dataset.state = state;
+  mascotEl.setAttribute('aria-label', `CyberMascot is ${state}. Press Enter or Space to interact.`);
+  mascotStatus.textContent = `CyberMascot is ${state}.`;
+  for (const activeState of ['listening', 'thinking', 'speaking', 'working']) {
+    mascotWrap.classList.toggle(activeState, activeState === state);
+  }
+  if (duration > 0) {
+    mascotStateTimer = setTimeout(() => {
+      mascotStateTimer = null;
+      restoreMascotState();
+    }, duration);
+  }
+}
+
+function restoreMascotState() {
+  setMascotState(listening ? 'listening' : thinkingActive ? 'thinking' : 'idle');
 }
 
 function applyGlow(m) {
@@ -2808,17 +2968,32 @@ function notifyEvent(title, body) {
 }
 
 function monitorLoad(m) {
-  const high = (m.cpu || 0) >= 90 || m.mem.pct >= 90;
-  if (!high) {
+  const cpuThreshold = Number.isFinite(appState.settings.cpuWarningThreshold)
+    ? appState.settings.cpuWarningThreshold
+    : 90;
+  const memoryThreshold = Number.isFinite(appState.settings.memoryWarningThreshold)
+    ? appState.settings.memoryWarningThreshold
+    : 90;
+  const cpuHigh = (m.cpu || 0) >= cpuThreshold;
+  const memoryHigh = m.mem.pct >= memoryThreshold;
+  if (!cpuHigh && !memoryHigh) {
     highSince = 0;
+    highSignature = '';
     return;
   }
-  if (!highSince) highSince = Date.now();
+  const signature = `${cpuHigh}:${memoryHigh}:${cpuThreshold}:${memoryThreshold}`;
+  if (!highSince || signature !== highSignature) {
+    highSince = Date.now();
+    highSignature = signature;
+  }
   if (Date.now() - highSince >= 30000 && Date.now() - highNotifiedAt > 5 * 60 * 1000) {
     highNotifiedAt = Date.now();
     const cpu = Math.round(m.cpu || 0);
     const ram = Math.round(m.mem.pct);
-    notifyEvent('System under load', `CPU ${cpu}% and RAM ${ram}% stayed above 90% for 30 seconds. Want me to close a heavy process?`);
+    const exceeded = [];
+    if (cpuHigh) exceeded.push(`CPU ${cpu}% (threshold ${cpuThreshold}%)`);
+    if (memoryHigh) exceeded.push(`RAM ${ram}% (threshold ${memoryThreshold}%)`);
+    notifyEvent('System under load', `${exceeded.join(' and ')} stayed at or above its threshold for 30 seconds. Want me to close a heavy process?`);
   }
 }
 
@@ -2921,12 +3096,7 @@ function setDropHot(on) {
 
 async function loadDroppedFile(file) {
   if (!file) return;
-  const filePath = file.path;
-  if (!filePath) {
-    addMessage('bot', 'I could not resolve that file path. Try dropping it from Explorer.');
-    return;
-  }
-  const res = await api.readFile(filePath);
+  const res = await api.readDroppedFile(file);
   if (!res || !res.ok) {
     addMessage('bot', 'Could not load ' + file.name + ': ' + ((res && res.error) || 'unsupported file'));
     return;
@@ -3035,6 +3205,8 @@ window.__mascot = {
   appState.ollamaUrl = state.ollamaUrl || 'http://127.0.0.1:11434';
   appState.settings = { ...appState.settings, ...(state.settings || {}) };
   appState.autostartError = state.autostartError || '';
+  appState.keyStorageError = state.keyStorageError || '';
+  if (appState.keyStorageError) flashNote(appState.keyStorageError);
   appState.clipboard = state.clipboard || [];
   appState.workspacePath = state.workspacePath || '';
   appState.weather = state.weather || null;

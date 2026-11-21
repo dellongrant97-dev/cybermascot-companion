@@ -1,5 +1,7 @@
 node_modules/
 dist/
+.stage2-backups/
+.stage3-backups/
 .env
 .env.*
 !.env.example

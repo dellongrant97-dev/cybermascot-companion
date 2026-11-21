@@ -217,8 +217,13 @@ const CDP = require('chrome-remote-interface');
   const shot = await evaluate('window.companion.captureScreen()');
   check('screen capture returns compressed jpeg', Boolean(shot && shot.ok && /^data:image\/jpeg;base64,/.test(shot.dataUrl) && shot.width <= 1280 && shot.base64.length < 900000), shot && shot.ok ? shot.width + 'x' + shot.height + ' ' + Math.round(shot.base64.length / 1024) + 'KB' : (shot && shot.error));
 
-  const fileRead = await evaluate("window.companion.readFile('C:/Projects/CyberMascot/companion/package.json')");
-  check('file drop reader returns content', Boolean(fileRead && fileRead.ok && fileRead.content.includes('cybermascot-companion')), fileRead && (fileRead.name || fileRead.error));
+  const fileRead = await evaluate(`(async () => {
+    const arbitraryPathReader = typeof window.companion.readFile === 'function';
+    const syntheticFile = new File(['not from disk'], 'package.json', { type: 'text/plain' });
+    const result = await window.companion.readDroppedFile(syntheticFile);
+    return { arbitraryPathReader, acceptedSyntheticFile: Boolean(result && result.ok) };
+  })()`);
+  check('file reader requires a native dropped file', !fileRead.arbitraryPathReader && !fileRead.acceptedSyntheticFile, JSON.stringify(fileRead));
 
   const access = await evaluate(`(async () => {
     window.__mascot.applyAccessory('wizard');

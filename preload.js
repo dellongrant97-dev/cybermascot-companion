@@ -1,6 +1,6 @@
 'use strict';
 
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 const send = (channel) => (payload) => ipcRenderer.send(channel, payload);
 const invoke = (channel) => (payload) => ipcRenderer.invoke(channel, payload);
@@ -32,6 +32,7 @@ contextBridge.exposeInMainWorld('companion', {
   killProcess: invoke('sys:kill'),
   cleanupProcesses: invoke('sys:cleanup'),
   clipboardList: invoke('clipboard:list'),
+  clipboardClearHistory: invoke('clipboard:clear-history'),
   clipboardRead: invoke('clipboard:read'),
   clipboardCopy: invoke('clipboard:copy'),
   clipboardCapture: invoke('clipboard:push-history'),
@@ -39,6 +40,7 @@ contextBridge.exposeInMainWorld('companion', {
   getCachedNewsBriefing: invoke('news:cached'),
   getNewsBriefing: invoke('news:briefing'),
   openNewsArticle: invoke('news:open-article'),
+  openExternal: invoke('external:open'),
   chooseWorkspace: invoke('workspace:select'),
   clearWorkspace: invoke('workspace:clear'),
   getWorkspaceGitStatus: invoke('workspace:git'),
@@ -60,7 +62,15 @@ contextBridge.exposeInMainWorld('companion', {
   captureScreen: invoke('screen:capture'),
   searchDesktop: invoke('desktop:search'),
   revealDesktopFile: invoke('desktop:reveal'),
-  readFile: invoke('file:read'),
+  readDroppedFile: (file) => {
+    try {
+      const filePath = webUtils.getPathForFile(file);
+      if (!filePath) return Promise.resolve({ ok: false, error: 'Drop a file from your computer.' });
+      return ipcRenderer.invoke('file:read-dropped', filePath);
+    } catch (_) {
+      return Promise.resolve({ ok: false, error: 'Could not resolve the dropped file.' });
+    }
+  },
   mediaKey: invoke('media:key'),
   autostartGet: invoke('autostart:get'),
   autostartSet: invoke('autostart:set'),

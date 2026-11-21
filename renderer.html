@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
 <title>CyberMascot</title>
 <link rel="stylesheet" href="vendor/prism.css">
 <style>
@@ -975,6 +975,25 @@
     opacity: 0;
   }
   .mascot-wrap.listening .pulse { animation: listen 1.6s ease-out infinite; }
+  .mascot-wrap.thinking::before,
+  .mascot-wrap.working::before { animation: stateGlow 1.8s ease-in-out infinite; }
+  .mascot-wrap.speaking::before { animation: stateGlow .9s ease-in-out 2; }
+  @keyframes stateGlow {
+    0%, 100% { transform: scale(.97); }
+    50% { transform: scale(1.04); }
+  }
+  .mascot:focus-visible { outline: 2px solid rgba(255, 255, 255, .9); outline-offset: 5px; border-radius: 50%; }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
   @keyframes listen {
     0% { opacity: .55; transform: scale(.86); }
     100% { opacity: 0; transform: scale(1.16); }
@@ -1042,6 +1061,7 @@
     background: rgba(18, 20, 26, 0.96);
   }
   body.dnd .mascot-wrap,
+  body.dnd .mascot-wrap::before,
   body.dnd .mascot svg {
     animation: none !important;
     transition: none !important;
@@ -1299,9 +1319,9 @@
 
               <div class="skill-card">
                 <h3>Run a project check</h3>
-                <p>Commands run in the selected workspace. CyberMascot asks you to confirm each command first; only test/build checks are allowed.</p>
+                <p>CyberMascot asks for native confirmation before each check. Project scripts run with your Windows account's permissions and are not confined to this workspace; only run checks for projects you trust.</p>
                 <form id="codingCheckForm" class="field">
-                  <label for="codingCheckCommand">Allowed commands: npm test/run test, lint, build, check, typecheck; node --test; pytest; dotnet test; cargo test; go test</label>
+                  <label for="codingCheckCommand">Allowed commands: npm test; npm run test, lint, build, check, typecheck (optionally with a named suffix); node --test; pytest; dotnet test; cargo test; go test</label>
                   <div class="row">
                     <input type="text" id="codingCheckCommand" maxlength="250" placeholder="npm test" spellcheck="false">
                     <button type="submit" class="mini-btn" id="codingCheckRun">Review &amp; run</button>
@@ -1418,6 +1438,39 @@
               <label class="toggle"><input type="checkbox" id="setLogin"> Start CyberMascot when I sign in to Windows</label>
               <p class="optimizer-note" id="loginStartupStatus" aria-live="polite">When enabled, CyberMascot opens after you sign in to Windows. This does not create or manage a CyberMascot account.</p>
               <label class="toggle"><input type="checkbox" id="setNotify"> Notifications</label>
+              <div class="field">
+                <label for="setCpuWarningThreshold">CPU warning threshold</label>
+                <select id="setCpuWarningThreshold">
+                  <option value="70">70%</option>
+                  <option value="80">80%</option>
+                  <option value="85">85%</option>
+                  <option value="90">90%</option>
+                  <option value="95">95%</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="setMemoryWarningThreshold">RAM warning threshold</label>
+                <select id="setMemoryWarningThreshold">
+                  <option value="70">70%</option>
+                  <option value="80">80%</option>
+                  <option value="85">85%</option>
+                  <option value="90">90%</option>
+                  <option value="95">95%</option>
+                </select>
+              </div>
+              <p class="optimizer-note">A notification appears after CPU or RAM stays at or above its threshold for 30 seconds. Alerts repeat no more than once every five minutes.</p>
+              <label class="toggle"><input type="checkbox" id="setClipboardHistoryPaused"> Pause clipboard history</label>
+              <div class="field">
+                <label for="setClipboardRetention">Clipboard history retention</label>
+                <select id="setClipboardRetention">
+                  <option value="0">Keep until cleared</option>
+                  <option value="1">1 day</option>
+                  <option value="7">7 days</option>
+                  <option value="30">30 days</option>
+                </select>
+              </div>
+              <p class="optimizer-note" id="clipboardHistoryStatus" aria-live="polite">Clipboard history is stored locally in the app configuration.</p>
+              <button type="button" class="mini-btn danger wide" id="clearClipboardHistory">Clear clipboard history</button>
               <label class="toggle"><input type="checkbox" id="setPerf"> Performance mode (lighter glass)</label>
               <label class="toggle"><input type="checkbox" id="setDnd"> Do Not Disturb (pause animations)</label>
 
@@ -1510,8 +1563,8 @@
       <div class="pulse" aria-hidden="true"></div>
 
       <div class="notes" aria-hidden="true"><span>♪</span><span>♫</span><span>♪</span></div>
-      <div class="mascot hit" id="mascot">
-        <svg viewBox="0 0 400 400" role="img" aria-label="CyberMascot">
+      <div class="mascot hit" id="mascot" role="button" tabindex="0" aria-label="CyberMascot is idle. Press Enter or Space to interact.">
+        <svg viewBox="0 0 400 400" aria-hidden="true">
           <g id="bodyGroup">
             <rect x="90" y="106" width="220" height="188" rx="86" ry="86" fill="#ffffff"/>
             <g id="eyesGroup">
@@ -1558,6 +1611,7 @@
         </svg>
         <div class="zzz" aria-hidden="true"><span>z</span><span>z</span><span>z</span></div>
       </div>
+      <div id="mascotStatus" class="sr-only" aria-live="polite">CyberMascot is idle.</div>
     </div>
   </div>
 

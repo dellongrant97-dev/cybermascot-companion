@@ -1,14 +1,91 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, screen, Menu, globalShortcut, clipboard, shell, Notification, desktopCapturer, Tray, dialog, powerMonitor } = require('electron');
+const { app, BrowserWindow, ipcMain: electronIpcMain, screen, Menu, globalShortcut, clipboard, shell, Notification, desktopCapturer, Tray, dialog, powerMonitor, safeStorage } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
 const crypto = require('node:crypto');
+const { pathToFileURL } = require('node:url');
 const { spawn } = require('node:child_process');
+const {
+  getWorkspaceRoot,
+  resolveWorkspaceFile: resolveWorkspaceFileInRoot,
+  isSensitiveWorkspaceFile,
+  workspaceTextFile,
+  sha256
+} = require('./workspace-utils');
 
 let si = null;
 try { si = require('systeminformation'); } catch (_) {}
+
+function assertSafeIpcArguments(args) {
+  let nodeCount = 0;
+  let byteCount = 0;
+  const visit = (value, depth) => {
+    nodeCount++;
+    if (nodeCount > 30000 || depth > 32) throw new Error('IPC payload is too complex.');
+    if (value == null || typeof value === 'undefined' || typeof value === 'boolean') return;
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value)) throw new Error('IPC payload contains an invalid number.');
+      return;
+    }
+    if (typeof value === 'string') {
+      byteCount += Buffer.byteLength(value, 'utf8');
+      if (value.length > 8 * 1024 * 1024 || byteCount > 16 * 1024 * 1024) {
+        throw new Error('IPC payload is too large.');
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      if (value.length > 10000) throw new Error('IPC payload contains too many items.');
+      for (const item of value) visit(item, depth + 1);
+      return;
+    }
+    if (typeof value !== 'object') throw new Error('IPC payload contains an unsupported value.');
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error('IPC payload must contain plain data only.');
+    }
+    const keys = Object.keys(value);
+    if (keys.length > 1000) throw new Error('IPC payload contains too many fields.');
+    for (const key of keys) {
+      if (key === '__proto__' || key === 'prototype' || key === 'constructor') {
+        throw new Error('IPC payload contains a prohibited field.');
+      }
+      byteCount += Buffer.byteLength(key, 'utf8');
+      if (byteCount > 16 * 1024 * 1024) throw new Error('IPC payload is too large.');
+      visit(value[key], depth + 1);
+    }
+  };
+  visit(args, 0);
+}
+
+function createTrustedIpcMain(target, isTrusted) {
+  return {
+    handle(channel, listener) {
+      target.handle(channel, (event, ...args) => {
+        if (!isTrusted(event)) throw new Error('Rejected IPC request from an untrusted frame.');
+        assertSafeIpcArguments(args);
+        return listener(event, ...args);
+      });
+    },
+    on(channel, listener) {
+      target.on(channel, (event, ...args) => {
+        if (!isTrusted(event)) {
+          console.warn(`Rejected untrusted IPC event: ${channel}`);
+          return;
+        }
+        try {
+          assertSafeIpcArguments(args);
+        } catch (error) {
+          console.warn(`Rejected invalid IPC event ${channel}: ${error.message}`);
+          return;
+        }
+        return listener(event, ...args);
+      });
+    }
+  };
+}
 
 const WIN_W = 860;
 const WIN_H = 620;
@@ -46,19 +123,22 @@ const DEFAULT_CONFIG = {
     apiKey: ''
   },
   weather: { city: 'Nairobi', latitude: -1.2921, longitude: 36.8219, place: 'Nairobi, Kenya', useDeviceLocation: true, deviceLocation: null },
-  settings: { idleMinutes: 3, unit: 'C', alwaysOnTop: true, launchAtLogin: true, opacity: 0.55, notifications: true, clock: '24', accessory: 'classic', performance: false, dnd: false, humorLevel: 'medium', useEmojis: true },
+  settings: { idleMinutes: 3, unit: 'C', alwaysOnTop: true, launchAtLogin: true, opacity: 0.55, notifications: true, clock: '24', accessory: 'classic', performance: false, dnd: false, humorLevel: 'medium', useEmojis: true, cpuWarningThreshold: 90, memoryWarningThreshold: 90, clipboardHistoryPaused: false, clipboardRetentionDays: 0 },
   workspacePath: '',
   mascot: null,
   clipboard: []
 };
 
 let win = null;
+const rendererFileUrl = pathToFileURL(path.join(__dirname, 'renderer.html')).href;
+const ipcMain = createTrustedIpcMain(electronIpcMain, trustedWindowEvent);
 let side = 'right';
 let config = null;
 let tasks = [];
 let chatHistory = [];
 let codingSessions = [];
 let undoHistory = [];
+const pendingCodingEdits = new Map();
 let workspacePath = '';
 let newsCache = null;
 let newsCacheLoaded = false;
@@ -86,6 +166,8 @@ let fullscreenHidden = false;
 let fullscreenTimer = null;
 let focusable = true;
 let unlockBriefingPending = false;
+let encryptedApiKey = '';
+let keyStorageError = '';
 
 const userDir = () => app.getPath('userData');
 const configPath = () => path.join(userDir(), 'config.json');
@@ -317,47 +399,51 @@ function writeJsonStrict(file, value) {
 }
 
 function trustedWindowEvent(event) {
-  return Boolean(win && !win.isDestroyed() && event.sender === win.webContents);
+  if (!win || win.isDestroyed() || !event || event.sender !== win.webContents) return false;
+  const frame = event.senderFrame;
+  return Boolean(frame && frame === win.webContents.mainFrame && frame.url === rendererFileUrl);
+}
+
+function makeEncryptedConfigBackup(rawConfig) {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('Windows secure storage is unavailable.');
+  }
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupPath = path.join(userDir(), `config.json.pre-safestorage-${timestamp}.enc`);
+  const encrypted = safeStorage.encryptString(rawConfig);
+  fs.writeFileSync(backupPath, encrypted, { flag: 'wx' });
+}
+
+function persistConfigStrict() {
+  const persisted = { ...config, chat: { ...config.chat } };
+  delete persisted.chat.apiKey;
+  if (config.chat.apiKey) {
+    if (!safeStorage.isEncryptionAvailable()) {
+      throw new Error('Windows secure storage is unavailable; the API key was not saved.');
+    }
+    encryptedApiKey = safeStorage.encryptString(config.chat.apiKey).toString('base64');
+  }
+  if (encryptedApiKey) persisted.chat.apiKeyEncrypted = encryptedApiKey;
+  else delete persisted.chat.apiKeyEncrypted;
+  writeJsonStrict(configPath(), persisted);
+}
+
+function saveConfig() {
+  try {
+    persistConfigStrict();
+    if (config.chat.apiKey || !encryptedApiKey) keyStorageError = '';
+  } catch (error) {
+    keyStorageError = `Could not securely save settings: ${String((error && error.message) || error)}`;
+    console.error(keyStorageError);
+  }
 }
 
 function currentWorkspaceRoot() {
-  if (!workspacePath) throw new Error('Choose a workspace folder first.');
-  const root = fs.realpathSync(workspacePath);
-  if (!fs.statSync(root).isDirectory()) throw new Error('The selected workspace is not a folder.');
-  return root;
+  return getWorkspaceRoot(workspacePath);
 }
 
 function resolveWorkspaceFile(relativePath, root = currentWorkspaceRoot()) {
-  const value = String(relativePath || '');
-  if (!value || path.isAbsolute(value)) throw new Error('Choose a file inside the selected workspace.');
-  const absolute = path.resolve(root, value);
-  const relative = path.relative(root, absolute);
-  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-    throw new Error('File path is outside the selected workspace.');
-  }
-  const realPath = fs.realpathSync(absolute);
-  const realRelative = path.relative(root, realPath);
-  if (realRelative === '..' || realRelative.startsWith(`..${path.sep}`) || path.isAbsolute(realRelative)) {
-    throw new Error('File resolves outside the selected workspace.');
-  }
-  if (!fs.statSync(realPath).isFile()) throw new Error('Selected path is not a file.');
-  return { absolute: realPath, relative: realRelative.split(path.sep).join('/') };
-}
-
-function isSensitiveWorkspaceFile(relativePath) {
-  const base = path.basename(relativePath).toLowerCase();
-  return base === '.env' || base.startsWith('.env.') ||
-    /^(?:credentials?|secrets?|private-key|id_rsa|id_ed25519)(?:[._-]|$)/i.test(base) ||
-    /\.(pem|p12|pfx|key|keystore|secret)$/i.test(base);
-}
-
-function workspaceTextFile(relativePath) {
-  if (isSensitiveWorkspaceFile(relativePath)) return false;
-  return /\.(txt|md|markdown|json|jsonc|csv|tsv|log|js|mjs|cjs|ts|tsx|jsx|py|rb|go|rs|java|c|h|cpp|hpp|cs|css|scss|sass|less|html|htm|xml|svg|yml|yaml|toml|ini|cfg|conf|sh|bash|ps1|sql|gitignore|editorconfig)$/i.test(relativePath);
-}
-
-function sha256(value) {
-  return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
+  return resolveWorkspaceFileInRoot(relativePath, root);
 }
 
 function runReadOnlyGit(root, args) {
@@ -420,6 +506,10 @@ function runReadOnlyGit(root, args) {
 
 function loadState() {
   const saved = readJson(configPath(), {});
+  const savedApiKey = typeof (saved.chat && saved.chat.apiKey) === 'string' ? saved.chat.apiKey : '';
+  encryptedApiKey = typeof (saved.chat && saved.chat.apiKeyEncrypted) === 'string'
+    ? saved.chat.apiKeyEncrypted
+    : '';
   config = {
     ...DEFAULT_CONFIG,
     ...saved,
@@ -428,6 +518,56 @@ function loadState() {
     settings: { ...DEFAULT_CONFIG.settings, ...(saved.settings || {}) },
     clipboard: Array.isArray(saved.clipboard) ? saved.clipboard.slice(0, CLIP_LIMIT) : []
   };
+  const warningThresholds = [70, 80, 85, 90, 95];
+  if (!warningThresholds.includes(config.settings.cpuWarningThreshold)) {
+    config.settings.cpuWarningThreshold = DEFAULT_CONFIG.settings.cpuWarningThreshold;
+  }
+  if (!warningThresholds.includes(config.settings.memoryWarningThreshold)) {
+    config.settings.memoryWarningThreshold = DEFAULT_CONFIG.settings.memoryWarningThreshold;
+  }
+  if (typeof config.settings.clipboardHistoryPaused !== 'boolean') {
+    config.settings.clipboardHistoryPaused = DEFAULT_CONFIG.settings.clipboardHistoryPaused;
+  }
+  if (![0, 1, 7, 30].includes(config.settings.clipboardRetentionDays)) {
+    config.settings.clipboardRetentionDays = DEFAULT_CONFIG.settings.clipboardRetentionDays;
+  }
+  delete config.chat.apiKeyEncrypted;
+  config.chat.apiKey = '';
+  keyStorageError = '';
+  if (encryptedApiKey) {
+    try {
+      if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is unavailable.');
+      config.chat.apiKey = safeStorage.decryptString(Buffer.from(encryptedApiKey, 'base64'));
+    } catch (error) {
+      config.chat.apiKey = '';
+      keyStorageError = `The saved API key could not be decrypted and has been preserved. ${String((error && error.message) || error)}`;
+      console.error(keyStorageError);
+    }
+    if (savedApiKey && config.chat.apiKey) {
+      try {
+        const rawConfig = fs.readFileSync(configPath(), 'utf8');
+        makeEncryptedConfigBackup(rawConfig);
+        persistConfigStrict();
+        keyStorageError = '';
+      } catch (error) {
+        keyStorageError = `The legacy plaintext key could not be removed from configuration. ${String((error && error.message) || error)}`;
+        console.error(keyStorageError);
+      }
+    }
+  } else if (savedApiKey) {
+    config.chat.apiKey = savedApiKey;
+    try {
+      if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is unavailable.');
+      const rawConfig = fs.readFileSync(configPath(), 'utf8');
+      makeEncryptedConfigBackup(rawConfig);
+      encryptedApiKey = safeStorage.encryptString(savedApiKey).toString('base64');
+      persistConfigStrict();
+    } catch (error) {
+      encryptedApiKey = '';
+      keyStorageError = `The saved API key could not be migrated; the existing configuration was preserved. ${String((error && error.message) || error)}`;
+      console.error(keyStorageError);
+    }
+  }
   if (typeof saved.autostartConfigured !== 'boolean') {
     config.autostartConfigured = Boolean(saved.settings && Object.prototype.hasOwnProperty.call(saved.settings, 'launchAtLogin'));
   }
@@ -452,10 +592,6 @@ function loadState() {
     config.chat.provider = 'ollama';
     saveConfig();
   }
-}
-
-function saveConfig() {
-  writeJson(configPath(), config);
 }
 
 function saveTasks() {
@@ -595,10 +731,26 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       backgroundThrottling: true
     }
   });
+
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    const external = parseApprovedExternalUrl(url);
+    if (external) {
+      shell.openExternal(external).catch((error) => {
+        console.error(`Could not open external link: ${String((error && error.message) || error)}`);
+      });
+    }
+    return { action: 'deny' };
+  });
+  const denyUnexpectedNavigation = (event, url) => {
+    if (url !== rendererFileUrl) event.preventDefault();
+  };
+  win.webContents.on('will-navigate', denyUnexpectedNavigation);
+  win.webContents.on('will-redirect', denyUnexpectedNavigation);
+  win.webContents.on('will-attach-webview', (event) => event.preventDefault());
 
   win.setAlwaysOnTop(config.settings.alwaysOnTop !== false, 'floating');
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
@@ -627,6 +779,16 @@ function createWindow() {
       send('briefing:show');
     }
   });
+}
+
+function parseApprovedExternalUrl(target) {
+  try {
+    const url = new URL(String(target || ''));
+    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) return null;
+    return url.toString();
+  } catch (_) {
+    return null;
+  }
 }
 
 function clamp(v, lo, hi) {
@@ -931,6 +1093,8 @@ function systemPrompt(weather, now = new Date()) {
 async function readHttpError(res) {
   let text = '';
   try { text = (await res.text()).slice(0, 500).replace(/\s+/g, ' ').trim(); } catch (_) {}
+  const secret = String(config && config.chat && config.chat.apiKey || '');
+  if (secret) text = text.split(secret).join('[redacted]');
   return new Error('HTTP ' + res.status + (text ? ' · ' + text : ''));
 }
 
@@ -939,6 +1103,8 @@ async function chatCompletion(messages, image) {
   const withImage = (image && String(image).trim()) || '';
   if (cfg.provider === 'openai' || cfg.provider === 'gemini') {
     const base = (cfg.baseUrl || 'https://api.openai.com/v1').replace(/\/$/, '');
+    const endpointError = validateEndpointUrl(base, 'AI base URL');
+    if (endpointError) throw new Error(endpointError);
     let payloadMessages = messages;
     if (withImage) {
       payloadMessages = messages.map((msg, index) => {
@@ -959,7 +1125,8 @@ async function chatCompletion(messages, image) {
         Authorization: `Bearer ${cfg.apiKey || ''}`
       },
       body: JSON.stringify({ model: cfg.model || 'gpt-4o-mini', messages: payloadMessages, stream: false }),
-      signal: AbortSignal.timeout(45000)
+      signal: AbortSignal.timeout(45000),
+      redirect: 'error'
     });
     if (!r.ok) throw await readHttpError(r);
     const j = await r.json();
@@ -967,6 +1134,8 @@ async function chatCompletion(messages, image) {
   }
 
   const base = normalizeOllamaUrl(cfg.url);
+  const endpointError = validateEndpointUrl(base, 'Ollama URL');
+  if (endpointError) throw new Error(endpointError);
   let payloadMessages = messages;
   if (withImage) {
     payloadMessages = messages.map((msg, index) => {
@@ -1293,17 +1462,47 @@ function registerHotkeys() {
 }
 
 function pushClipboard(text) {
+  const pruned = pruneClipboardHistory();
   const value = String(text || '').trim();
-  if (!value) return;
-  if (config.clipboard[0] && config.clipboard[0].text === value) return;
+  if (!value || config.settings.clipboardHistoryPaused) {
+    if (pruned) {
+      saveConfig();
+      send('clipboard:changed', config.clipboard);
+    }
+    return;
+  }
+  if (config.clipboard[0] && config.clipboard[0].text === value) {
+    if (pruned) {
+      saveConfig();
+      send('clipboard:changed', config.clipboard);
+    }
+    return;
+  }
   config.clipboard = [{ text: value.slice(0, 6000), at: Date.now() }, ...config.clipboard.filter((c) => c.text !== value)].slice(0, CLIP_LIMIT);
   saveConfig();
   send('clipboard:changed', config.clipboard);
 }
 
+function pruneClipboardHistory() {
+  const retentionDays = config.settings.clipboardRetentionDays;
+  if (![1, 7, 30].includes(retentionDays)) return false;
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  const retained = config.clipboard.filter((item) =>
+    !item || !Number.isFinite(item.at) || item.at >= cutoff
+  );
+  if (retained.length === config.clipboard.length) return false;
+  config.clipboard = retained;
+  return true;
+}
+
 function startClipboardWatch() {
-  try { lastClip = clipboard.readText() || ''; } catch (_) { lastClip = ''; }
+  try { lastClip = config.settings.clipboardHistoryPaused ? '' : clipboard.readText() || ''; } catch (_) { lastClip = ''; }
   clipTimer = setInterval(() => {
+    if (pruneClipboardHistory()) {
+      saveConfig();
+      send('clipboard:changed', config.clipboard);
+    }
+    if (config.settings.clipboardHistoryPaused) return;
     let text = '';
     try { text = clipboard.readText() || ''; } catch (_) { return; }
     if (text && text !== lastClip) {
@@ -1314,6 +1513,7 @@ function startClipboardWatch() {
 }
 
 ipcMain.handle('state:get', async () => {
+  if (pruneClipboardHistory()) saveConfig();
   const weather = await fetchWeather();
   const autostart = getAutostartStatus();
   return {
@@ -1325,6 +1525,7 @@ ipcMain.handle('state:get', async () => {
     provider: config.chat && config.chat.provider,
     baseUrl: config.chat && config.chat.baseUrl,
     ollamaUrl: config.chat && config.chat.url,
+    keyStorageError,
     settings: { ...config.settings, launchAtLogin: autostart.enabled },
     autostartError: autostart.error || '',
     city: config.weather.city,
@@ -1344,6 +1545,7 @@ ipcMain.handle('workspace:select', async (event) => {
   try {
     const selected = fs.realpathSync(result.filePaths[0]);
     if (!fs.statSync(selected).isDirectory()) return { ok: false, error: 'Select a folder.' };
+    pendingCodingEdits.clear();
     workspacePath = selected;
     config.workspacePath = selected;
     saveConfig();
@@ -1355,6 +1557,7 @@ ipcMain.handle('workspace:select', async (event) => {
 
 ipcMain.handle('workspace:clear', (event) => {
   if (!trustedWindowEvent(event)) return { ok: false, error: 'Untrusted sender.' };
+  pendingCodingEdits.clear();
   workspacePath = '';
   config.workspacePath = '';
   saveConfig();
@@ -1535,6 +1738,7 @@ ipcMain.handle('coding:propose-edit', async (event, payload) => {
   const instruction = String(payload && payload.instruction || '').trim().slice(0, 3000);
   if (!instruction) return { ok: false, error: 'Describe the change you want.' };
   try {
+    const root = currentWorkspaceRoot();
     const requestedPaths = Array.isArray(payload && payload.paths)
       ? payload.paths
       : [payload && payload.path];
@@ -1543,7 +1747,7 @@ ipcMain.handle('coding:propose-edit', async (event, payload) => {
       return { ok: false, error: 'Select between one and five edit target files.' };
     }
     const originals = selectedPaths.map((relativePath) => {
-      const file = resolveWorkspaceFile(relativePath);
+      const file = resolveWorkspaceFile(relativePath, root);
       if (!workspaceTextFile(file.relative)) throw new Error(`This file type cannot be edited: ${file.relative}`);
       const original = fs.readFileSync(file.absolute, 'utf8');
       if (Buffer.byteLength(original, 'utf8') > 80 * 1024 || original.includes('\u0000')) {
@@ -1596,30 +1800,74 @@ ipcMain.handle('coding:propose-edit', async (event, payload) => {
     if (edits.reduce((total, edit) => total + Buffer.byteLength(edit.content, 'utf8'), 0) > 300 * 1024) {
       return { ok: false, error: 'The proposed files total more than 300 KB. Ask for a smaller change.' };
     }
-    return { ok: true, edits };
+    const now = Date.now();
+    for (const [id, pending] of pendingCodingEdits) {
+      if (now - pending.createdAt >= 10 * 60 * 1000) pendingCodingEdits.delete(id);
+    }
+    while (pendingCodingEdits.size >= 10) {
+      pendingCodingEdits.delete(pendingCodingEdits.keys().next().value);
+    }
+    const proposalId = crypto.randomBytes(16).toString('hex');
+    pendingCodingEdits.set(proposalId, { root, edits, createdAt: now });
+    return { ok: true, proposalId, edits };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
   }
 });
 
-ipcMain.handle('coding:apply-edit', (event, payload) => {
+ipcMain.handle('coding:apply-edit', async (event, payload) => {
   if (!trustedWindowEvent(event)) return { ok: false, error: 'Untrusted sender.' };
   const tempPaths = [];
   const appliedEdits = [];
   let backup = null;
   try {
-    const requestedEdits = Array.isArray(payload && payload.edits)
-      ? payload.edits
-      : [payload];
-    if (!requestedEdits.length || requestedEdits.length > 5) {
-      return { ok: false, error: 'Apply between one and five reviewed file changes.' };
+    const proposalId = String(payload && payload.proposalId || '');
+    const pending = pendingCodingEdits.get(proposalId);
+    if (!pending || !/^[a-f0-9]{32}$/i.test(proposalId)) {
+      return { ok: false, error: 'The edit proposal is no longer available. Generate a fresh proposal.' };
+    }
+    pendingCodingEdits.delete(proposalId);
+    if (Date.now() - pending.createdAt >= 10 * 60 * 1000) {
+      return { ok: false, error: 'The edit proposal expired. Generate a fresh proposal.' };
     }
     const root = currentWorkspaceRoot();
+    if (path.resolve(root) !== path.resolve(pending.root)) {
+      return { ok: false, error: 'The workspace changed after this proposal. Generate a fresh proposal.' };
+    }
+    const requestedEdits = pending.edits.filter((edit) => edit.original !== edit.content);
+    if (!requestedEdits.length || requestedEdits.length > 5) {
+      return { ok: false, error: 'The proposal contains no applicable changes.' };
+    }
     const seenPaths = new Set();
-    const edits = requestedEdits.map((edit) => {
-      const file = resolveWorkspaceFile(edit && edit.path, root);
+    const approvedPaths = requestedEdits.map((edit) => {
+      const file = resolveWorkspaceFile(edit.path, root);
       if (seenPaths.has(file.relative)) throw new Error(`Duplicate edit target: ${file.relative}`);
       seenPaths.add(file.relative);
+      if (!workspaceTextFile(file.relative)) throw new Error(`This file type cannot be edited: ${file.relative}`);
+      if (sha256(fs.readFileSync(file.absolute, 'utf8')) !== String(edit.baseHash || '')) {
+        throw new Error(`The file changed after the proposal: ${file.relative}. Generate a fresh proposal.`);
+      }
+      return file.relative;
+    });
+    const approval = await dialog.showMessageBox(win, {
+      type: 'warning',
+      title: 'Apply reviewed code changes?',
+      message: `Apply changes to ${approvedPaths.length} workspace file${approvedPaths.length === 1 ? '' : 's'}?`,
+      detail: `${approvedPaths.join('\n')}\n\nThe companion will apply the stored proposal after checking file hashes. A backup will be kept for Undo.`,
+      buttons: ['Apply changes', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true
+    });
+    if (approval.response !== 0) {
+      pendingCodingEdits.set(proposalId, pending);
+      return { ok: false, cancelled: true, error: 'Applying the edit was cancelled.' };
+    }
+    const appliedPaths = new Set();
+    const edits = requestedEdits.map((edit) => {
+      const file = resolveWorkspaceFile(edit && edit.path, root);
+      if (appliedPaths.has(file.relative)) throw new Error(`Duplicate edit target: ${file.relative}`);
+      appliedPaths.add(file.relative);
       if (!workspaceTextFile(file.relative)) throw new Error(`This file type cannot be edited: ${file.relative}`);
       const original = fs.readFileSync(file.absolute, 'utf8');
       if (sha256(original) !== String(edit && edit.baseHash || '')) {
@@ -1717,7 +1965,7 @@ ipcMain.handle('coding:apply-edit', (event, payload) => {
   }
 });
 
-ipcMain.handle('coding:undo-edit', (event, undoId) => {
+ipcMain.handle('coding:undo-edit', async (event, undoId) => {
   if (!trustedWindowEvent(event)) return { ok: false, error: 'Untrusted sender.' };
   try {
     const index = undoHistory.findIndex((entry) => entry.id === undoId);
@@ -1737,6 +1985,17 @@ ipcMain.handle('coding:undo-edit', (event, undoId) => {
       }
       return { path: saved.path, absolute: file.absolute, current, original: saved.original };
     });
+    const approval = await dialog.showMessageBox(win, {
+      type: 'warning',
+      title: 'Undo code changes?',
+      message: `Restore ${files.length} file${files.length === 1 ? '' : 's'} from the saved backup?`,
+      detail: files.map((file) => file.path).join('\n'),
+      buttons: ['Restore files', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true
+    });
+    if (approval.response !== 0) return { ok: false, cancelled: true, error: 'Undo was cancelled.' };
     const tempPaths = [];
     const restoredPaths = [];
     try {
@@ -1802,25 +2061,115 @@ ipcMain.handle('coding:undo-edit', (event, undoId) => {
   }
 });
 
-ipcMain.handle('coding:run-check', (event, payload) => {
-  if (!trustedWindowEvent(event)) return Promise.resolve({ ok: false, error: 'Untrusted sender.' });
-  let root;
-  try { root = currentWorkspaceRoot(); } catch (err) { return Promise.resolve({ ok: false, error: String(err.message || err) }); }
-  const command = String(payload && payload.command || '').trim();
-  const allowedCommand = /^(npm (?:test|run (?:test|lint|build|check|typecheck)(?::[\w-]+)?)(?: -- [\w./:= -]+)?|node --test(?: [\w./\\*-]+)*|(?:python|python3) -m pytest(?: [\w./\\-]+)*|pytest(?: [\w./\\-]+)*|dotnet test(?: [\w./\\-]+)*|cargo test(?: -- [\w./\\-]+)*|go test(?: -count=\d+)?(?: \.\/[\w./*-]+)?)$/i;
-  if (command.length > 250 || !allowedCommand.test(command)) {
-    return Promise.resolve({ ok: false, error: 'Allowed checks: npm test/run test|lint|build|check|typecheck, node --test, pytest, dotnet test, cargo test, or go test.' });
+function parseCodingCheckCommand(value) {
+  const command = typeof value === 'string' ? value.trim() : '';
+  if (!command || command.length > 250) return null;
+  if (/^npm test$/i.test(command)) return { tool: 'npm', args: ['test'], command };
+  const npmRun = command.match(/^npm run ((?:test|lint|build|check|typecheck)(?::[\w-]+)?)$/i);
+  if (npmRun) return { tool: 'npm', args: ['run', npmRun[1]], command };
+  if (/^node --test$/i.test(command)) return { tool: 'node', args: ['--test'], command };
+  if (/^(?:python(?:3)? -m pytest|pytest)$/i.test(command)) {
+    return { tool: 'python', args: ['-m', 'pytest'], command };
   }
+  if (/^dotnet test$/i.test(command)) return { tool: 'dotnet', args: ['test'], command };
+  if (/^cargo test$/i.test(command)) return { tool: 'cargo', args: ['test'], command };
+  if (/^go test$/i.test(command)) return { tool: 'go', args: ['test'], command };
+  return null;
+}
+
+function isPathInsideCodingWorkspace(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return !relative || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+function findCodingExecutable(name, root) {
+  const environmentPath = String(process.env.PATH || '');
+  const executableName = process.platform === 'win32' && !/\.(?:exe|com)$/i.test(name)
+    ? `${name}.exe`
+    : name;
+  for (const rawDirectory of environmentPath.split(path.delimiter)) {
+    const directory = rawDirectory.trim().replace(/^"|"$/g, '');
+    if (!directory) continue;
+    try {
+      const executable = fs.realpathSync(path.join(directory, executableName));
+      if (!fs.statSync(executable).isFile() || isPathInsideCodingWorkspace(root, executable)) continue;
+      if (process.platform === 'win32' && executable.toLowerCase().includes(`${path.sep}windowsapps${path.sep}`)) continue;
+      return executable;
+    } catch (_) {}
+  }
+  throw new Error(`Could not find ${name} on PATH. Install it or add its executable directory to PATH.`);
+}
+
+function findNpmCli(nodeExecutable, root) {
+  const candidate = path.join(path.dirname(nodeExecutable), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  try {
+    const cli = fs.realpathSync(candidate);
+    if (fs.statSync(cli).isFile() && path.extname(cli).toLowerCase() === '.js' && !isPathInsideCodingWorkspace(root, cli)) {
+      return cli;
+    }
+  } catch (_) {
+  }
+  throw new Error('Could not find the npm CLI beside the installed Node.js executable.');
+}
+
+function resolveCodingCheck(parsed, root) {
+  if (parsed.tool === 'npm') {
+    const node = findCodingExecutable('node', root);
+    return { executable: node, args: [findNpmCli(node, root), ...parsed.args] };
+  }
+  if (parsed.tool === 'python') {
+    return { executable: findCodingExecutable('python', root), args: parsed.args };
+  }
+  return { executable: findCodingExecutable(parsed.tool, root), args: parsed.args };
+}
+
+ipcMain.handle('coding:run-check', async (event, payload) => {
+  if (!trustedWindowEvent(event)) return { ok: false, error: 'Untrusted sender.' };
+  let root;
+  try {
+    root = currentWorkspaceRoot();
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+  const parsed = parseCodingCheckCommand(payload && payload.command);
+  if (!parsed) {
+    return { ok: false, error: 'Allowed checks: npm test/run test|lint|build|check|typecheck, node --test, pytest, dotnet test, cargo test, or go test. Arguments and shell syntax are not accepted.' };
+  }
+  let resolved;
+  try {
+    resolved = resolveCodingCheck(parsed, root);
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+  const approval = await dialog.showMessageBox(win, {
+    type: 'warning',
+    title: 'Run project check?',
+    message: `Run "${parsed.command}" in the selected workspace?`,
+    detail: `Workspace: ${root}\n\nProject checks and scripts run with your Windows account's permissions. They are not confined to this workspace and may access or change files elsewhere. Run checks only for projects you trust.`,
+    buttons: ['Run check', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true
+  });
+  if (approval.response !== 0) return { ok: false, cancelled: true, error: 'The check was not run.' };
+
   return new Promise((resolve) => {
     let child;
     let stdout = '';
     let stderr = '';
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
     let settled = false;
+    let timedOut = false;
     let timer = null;
+    let killFallbackTimer = null;
     const finish = (result) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (killFallbackTimer) clearTimeout(killFallbackTimer);
       if (result && result.command) {
         const session = codingSessions.find((entry) =>
           entry.workspace && path.resolve(entry.workspace) === path.resolve(root)
@@ -1844,31 +2193,112 @@ ipcMain.handle('coding:run-check', (event, payload) => {
       }
       resolve(result);
     };
+    const truncateOutput = (value, maxBytes) => {
+      let low = 0;
+      let high = value.length;
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        if (Buffer.byteLength(value.slice(0, middle), 'utf8') <= maxBytes) low = middle;
+        else high = middle - 1;
+      }
+      if (low > 0 && low < value.length) {
+        const previous = value.charCodeAt(low - 1);
+        if (previous >= 0xD800 && previous <= 0xDBFF) low--;
+      }
+      return value.slice(0, low);
+    };
+    const appendOutput = (current, chunk, currentBytes) => {
+      const remaining = 40000 - currentBytes;
+      if (remaining <= 0) return { text: current, bytes: currentBytes, truncated: chunk.length > 0 };
+      const decoded = chunk.toString('utf8');
+      const accepted = truncateOutput(decoded, remaining);
+      const acceptedBytes = Buffer.byteLength(accepted, 'utf8');
+      return {
+        text: current + accepted,
+        bytes: currentBytes + acceptedBytes,
+        truncated: accepted.length < decoded.length
+      };
+    };
     try {
-      child = spawn(command, { cwd: root, shell: true, windowsHide: true });
+      const childEnvironment = { ...process.env };
+      for (const name of Object.keys(childEnvironment)) {
+        if (/^(?:NODE_OPTIONS|NODE_PATH|npm_config_script_shell)$/i.test(name)) delete childEnvironment[name];
+      }
+      child = spawn(resolved.executable, resolved.args, {
+        cwd: root,
+        shell: false,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: childEnvironment,
+        detached: process.platform !== 'win32'
+      });
     } catch (err) {
-      finish({ ok: false, error: String((err && err.message) || err) });
+      finish({ ok: false, error: String((err && err.message) || err), command: parsed.command });
       return;
     }
-    const appendOutput = (target, chunk) => {
-      const remaining = 40000 - target.length;
-      if (remaining > 0) return target + chunk.toString().slice(0, remaining);
-      return target;
-    };
-    child.stdout.on('data', (chunk) => { stdout = appendOutput(stdout, chunk); });
-    child.stderr.on('data', (chunk) => { stderr = appendOutput(stderr, chunk); });
-    child.on('error', (err) => finish({ ok: false, error: String((err && err.message) || err), command }));
+    child.stdout.on('data', (chunk) => {
+      const output = appendOutput(stdout, chunk, stdoutBytes);
+      stdout = output.text;
+      stdoutBytes = output.bytes;
+      stdoutTruncated = stdoutTruncated || output.truncated;
+    });
+    child.stderr.on('data', (chunk) => {
+      const output = appendOutput(stderr, chunk, stderrBytes);
+      stderr = output.text;
+      stderrBytes = output.bytes;
+      stderrTruncated = stderrTruncated || output.truncated;
+    });
+    child.on('error', (err) => finish({
+      ok: false,
+      error: String((err && err.message) || err),
+      command: parsed.command,
+      stdout,
+      stderr,
+      stdoutTruncated,
+      stderrTruncated
+    }));
     child.on('close', (code) => finish({
-      ok: code === 0,
-      command,
+      ok: !timedOut && code === 0,
+      command: parsed.command,
       exitCode: code,
       stdout,
       stderr,
-      timedOut: false
+      stdoutTruncated,
+      stderrTruncated,
+      timedOut,
+      ...(timedOut ? { error: 'Check timed out after 120 seconds.' } : {})
     }));
     timer = setTimeout(() => {
-      try { child.kill(); } catch (_) {}
-      finish({ ok: false, command, stdout, stderr, timedOut: true, error: 'Check timed out after 120 seconds.' });
+      timedOut = true;
+      if (process.platform === 'win32' && Number.isInteger(child.pid)) {
+        const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
+        const taskkill = path.join(systemRoot, 'System32', 'taskkill.exe');
+        try {
+          const terminator = spawn(taskkill, ['/PID', String(child.pid), '/T', '/F'], {
+            shell: false,
+            windowsHide: true,
+            stdio: 'ignore'
+          });
+          terminator.once('error', () => { if (!settled) child.kill(); });
+          terminator.once('close', (code) => { if (code !== 0 && !settled) child.kill(); });
+        } catch (_) {
+          try { child.kill(); } catch (_) {}
+        }
+      } else {
+        try { process.kill(-child.pid, 'SIGTERM'); } catch (_) {
+          try { child.kill('SIGTERM'); } catch (_) {}
+        }
+      }
+      killFallbackTimer = setTimeout(() => {
+        if (settled) return;
+        if (process.platform === 'win32') {
+          try { child.kill(); } catch (_) {}
+        } else {
+          try { process.kill(-child.pid, 'SIGKILL'); } catch (_) {
+            try { child.kill('SIGKILL'); } catch (_) {}
+          }
+        }
+      }, 5000);
     }, 120000);
   });
 });
@@ -1885,6 +2315,7 @@ ipcMain.handle('coding:sessions:resume', (event, id) => {
   try {
     const root = fs.realpathSync(session.workspace);
     if (!fs.statSync(root).isDirectory()) return { ok: false, error: 'The saved workspace is no longer a folder.' };
+    pendingCodingEdits.clear();
     workspacePath = root;
     config.workspacePath = root;
     saveConfig();
@@ -2075,8 +2506,9 @@ ipcMain.handle('tasks:clear-done', () => {
 ipcMain.handle('history:get', () => chatHistory);
 
 ipcMain.handle('history:append', (_e, message) => {
-  if (!message || !message.role || typeof message.content !== 'string') return false;
-  const role = message.role === 'assistant' ? 'assistant' : 'user';
+  if (!isPlainObject(message) || !['user', 'assistant'].includes(message.role) ||
+      typeof message.content !== 'string' || message.content.length > 100000) return false;
+  const role = message.role;
   const content = message.content.trim();
   if (!content) return false;
   chatHistory.push({ role, content, at: Date.now() });
@@ -2095,8 +2527,8 @@ ipcMain.on('notify', (_e, payload) => {
   if (!Notification.isSupported()) return;
   try {
     const n = new Notification({
-      title: String((payload && payload.title) || 'CyberMascot'),
-      body: String((payload && payload.body) || ''),
+      title: String((payload && payload.title) || 'CyberMascot').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 128),
+      body: String((payload && payload.body) || '').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 1000),
       silent: true
     });
     n.on('click', wakeNow);
@@ -2144,6 +2576,16 @@ ipcMain.handle('chat:send', async (_e, payload) => {
   try {
     const messages = Array.isArray(payload) ? payload : (payload && payload.messages) || [];
     const image = payload && payload.image ? payload.image : '';
+    if (!Array.isArray(messages) || messages.length > 100 ||
+        messages.some((message) => !isPlainObject(message) ||
+          !['user', 'assistant'].includes(message.role) ||
+          typeof message.content !== 'string' || message.content.length > 100000)) {
+      return { ok: false, error: 'Chat messages have an invalid format or exceed the allowed size.' };
+    }
+    if (image && (typeof image !== 'string' || image.length > 2 * 1024 * 1024 ||
+        !/^[A-Za-z0-9+/]*={0,2}$/.test(image))) {
+      return { ok: false, error: 'The attached image is invalid or too large.' };
+    }
     const greetingReply = image ? '' : quickGreetingReply(messages);
     if (greetingReply) return { ok: true, reply: greetingReply };
     const cfg = config.chat || {};
@@ -2188,8 +2630,10 @@ ipcMain.handle('chat:set-model', (_e, model) => {
 
 async function fetchOllamaModels() {
   const base = normalizeOllamaUrl(config.chat && config.chat.url);
+  const endpointError = validateEndpointUrl(base, 'Ollama URL');
+  if (endpointError) return { ok: false, models: [], base, error: endpointError };
   try {
-    const r = await fetch(`${base}/api/tags`, { signal: AbortSignal.timeout(10000) });
+    const r = await fetch(`${base}/api/tags`, { signal: AbortSignal.timeout(10000), redirect: 'error' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
     const models = (j.models || [])
@@ -2244,7 +2688,8 @@ ipcMain.handle('ollama:diagnostics', async (event, testModel) => {
         stream: false,
         options: { num_predict: 8 }
       }),
-      signal: AbortSignal.timeout(120000)
+      signal: AbortSignal.timeout(120000),
+      redirect: 'error'
     });
     if (!response.ok) {
       return {
@@ -2281,13 +2726,94 @@ ipcMain.handle('settings:get', () => {
   return {
     settings: { ...config.settings, launchAtLogin: autostart.enabled },
     autostartError: autostart.error || '',
+    keyStorageError,
     weather: { city: config.weather.city, useDeviceLocation: config.weather.useDeviceLocation !== false },
     chat: { provider: config.chat.provider, model: config.chat.model, baseUrl: config.chat.baseUrl, ollamaUrl: config.chat.url, hasKey: Boolean(config.chat.apiKey) }
   };
 });
 
+function isPlainObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function hasOnlyKeys(value, allowed) {
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function validateEndpointUrl(value, label) {
+  if (typeof value !== 'string' || value.length > 2048) return `${label} must be a URL under 2048 characters.`;
+  if (!value.trim()) return '';
+  let url;
+  try { url = new URL(value); } catch (_) { return `${label} is not a valid URL.`; }
+  if (url.username || url.password) return `${label} must not contain credentials.`;
+  if (url.protocol === 'https:') return '';
+  const host = url.hostname.toLowerCase();
+  if (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]', '::1'].includes(host)) return '';
+  return `${label} must use HTTPS, or HTTP on this computer only.`;
+}
+
+function validateSettingsPatch(patch) {
+  if (!isPlainObject(patch) || !hasOnlyKeys(patch, new Set(['settings', 'chat', 'weather']))) {
+    return 'Settings patch must contain only settings, chat, or weather fields.';
+  }
+  if (patch.settings !== undefined) {
+    const values = patch.settings;
+    const allowed = new Set([
+      'idleMinutes', 'unit', 'alwaysOnTop', 'launchAtLogin', 'notifications',
+      'performance', 'dnd', 'clock', 'opacity', 'accessory', 'humorLevel', 'useEmojis',
+      'cpuWarningThreshold', 'memoryWarningThreshold', 'clipboardHistoryPaused', 'clipboardRetentionDays'
+    ]);
+    if (!isPlainObject(values) || !hasOnlyKeys(values, allowed)) return 'Settings contain an unsupported field.';
+    for (const [key, value] of Object.entries(values)) {
+      if (key === 'idleMinutes' && ![0, 1, 3, 5, 15].includes(value)) return 'Choose a supported idle time.';
+      if (key === 'unit' && !['C', 'F'].includes(value)) return 'Choose Celsius or Fahrenheit.';
+      if (['alwaysOnTop', 'launchAtLogin', 'notifications', 'performance', 'dnd', 'useEmojis'].includes(key) && typeof value !== 'boolean') {
+        return `${key} must be enabled or disabled.`;
+      }
+      if (key === 'clock' && !['12', '24', 'off'].includes(value)) return 'Choose a supported clock display.';
+      if (key === 'opacity' && (typeof value !== 'number' || value < 0.2 || value > 1)) return 'Glass opacity must be between 20 and 100 percent.';
+      if (key === 'accessory' && !['classic', 'visor', 'wizard', 'coffee', 'headphones'].includes(value)) return 'Choose a supported appearance.';
+      if (key === 'humorLevel' && !['low', 'medium', 'high'].includes(value)) return 'Choose low, medium, or high humor.';
+      if (['cpuWarningThreshold', 'memoryWarningThreshold'].includes(key) && ![70, 80, 85, 90, 95].includes(value)) {
+        return 'Choose a CPU or memory warning threshold from 70 to 95 percent.';
+      }
+      if (key === 'clipboardHistoryPaused' && typeof value !== 'boolean') return 'Clipboard history pause must be enabled or disabled.';
+      if (key === 'clipboardRetentionDays' && ![0, 1, 7, 30].includes(value)) return 'Choose a supported clipboard-history retention period.';
+    }
+  }
+  if (patch.chat !== undefined) {
+    const values = patch.chat;
+    const allowed = new Set(['provider', 'url', 'model', 'baseUrl', 'apiKey']);
+    if (!isPlainObject(values) || !hasOnlyKeys(values, allowed)) return 'AI settings contain an unsupported field.';
+    if (values.provider !== undefined && !['ollama', 'gemini', 'openai'].includes(values.provider)) return 'Choose a supported AI provider.';
+    if (values.model !== undefined && (typeof values.model !== 'string' || values.model.length > 200 || /[\u0000-\u001f\u007f]/.test(values.model))) return 'Model name must be 200 characters or fewer and contain no control characters.';
+    if (values.apiKey !== undefined && (typeof values.apiKey !== 'string' || values.apiKey.length > 4096 || /[\u0000-\u001f\u007f]/.test(values.apiKey))) return 'API key must be 4096 characters or fewer and contain no control characters.';
+    if (values.baseUrl !== undefined) {
+      const error = validateEndpointUrl(values.baseUrl, 'AI base URL');
+      if (error) return error;
+    }
+    if (values.url !== undefined) {
+      const error = validateEndpointUrl(values.url, 'Ollama URL');
+      if (error) return error;
+    }
+  }
+  if (patch.weather !== undefined) {
+    const values = patch.weather;
+    if (!isPlainObject(values) || !hasOnlyKeys(values, new Set(['city', 'useDeviceLocation']))) return 'Weather settings contain an unsupported field.';
+    if (values.city !== undefined && (typeof values.city !== 'string' || values.city.length > 100 || /[\u0000-\u001f]/.test(values.city))) {
+      return 'Weather city must be 100 characters or fewer and contain no control characters.';
+    }
+    if (values.useDeviceLocation !== undefined && typeof values.useDeviceLocation !== 'boolean') return 'Device location must be enabled or disabled.';
+  }
+  return '';
+}
+
 ipcMain.handle('settings:set', async (_e, patch) => {
-  const p = patch || {};
+  const validationError = validateSettingsPatch(patch);
+  if (validationError) return { ok: false, error: validationError };
+  const p = patch;
   if (p.settings && Object.prototype.hasOwnProperty.call(p.settings, 'humorLevel') &&
       !['low', 'medium', 'high'].includes(p.settings.humorLevel)) {
     return { ok: false, error: 'Choose low, medium, or high humor.' };
@@ -2305,7 +2831,15 @@ ipcMain.handle('settings:set', async (_e, patch) => {
   if (p.settings) config.settings = { ...config.settings, ...p.settings };
   if (p.chat) {
     const next = { ...config.chat, ...p.chat };
-    if (p.chat.apiKey === '') delete next.apiKey;
+    if (Object.prototype.hasOwnProperty.call(p.chat, 'apiKey')) {
+      const apiKey = p.chat.apiKey.trim();
+      if (!apiKey) {
+        delete next.apiKey;
+        encryptedApiKey = '';
+      } else {
+        next.apiKey = apiKey;
+      }
+    }
     config.chat = next;
   }
   if (p.weather && typeof p.weather.city === 'string') {
@@ -2331,7 +2865,14 @@ ipcMain.handle('settings:set', async (_e, patch) => {
   const autostart = getAutostartStatus();
   config.settings.launchAtLogin = autostart.enabled;
   config.autostart = autostart.enabled;
-  saveConfig();
+  try {
+    persistConfigStrict();
+    if (config.chat.apiKey || !encryptedApiKey) keyStorageError = '';
+  } catch (error) {
+    keyStorageError = `Could not securely save settings: ${String((error && error.message) || error)}`;
+    console.error(keyStorageError);
+    return { ok: false, error: keyStorageError };
+  }
   applySettings();
   const weather = await fetchWeather();
   return {
@@ -2339,6 +2880,7 @@ ipcMain.handle('settings:set', async (_e, patch) => {
     weather,
     weatherCity: config.weather.city,
     weatherLocationEnabled: config.weather.useDeviceLocation !== false,
+    keyStorageError,
     chat: { provider: config.chat.provider, model: config.chat.model, baseUrl: config.chat.baseUrl, ollamaUrl: config.chat.url, hasKey: Boolean(config.chat.apiKey) }
   };
 });
@@ -2439,6 +2981,9 @@ ipcMain.handle('sys:cleanup', async (_e, pids) => {
   try {
     const p = await si.processes();
     const candidates = (p.list || []).filter((x) => x && !isProtectedProcess(x));
+    if (!Array.isArray(pids) || pids.length > 64) {
+      return { ok: false, error: 'Select no more than 64 processes at a time.' };
+    }
     const requested = Array.isArray(pids)
       ? Array.from(new Set(pids.map((v) => Number(v)).filter((v) => Number.isInteger(v) && v > 4)))
       : [];
@@ -2478,14 +3023,23 @@ ipcMain.handle('sys:cleanup', async (_e, pids) => {
   }
 });
 
-ipcMain.handle('clipboard:list', () => config.clipboard);
+ipcMain.handle('clipboard:list', () => {
+  if (pruneClipboardHistory()) {
+    saveConfig();
+    send('clipboard:changed', config.clipboard);
+  }
+  return config.clipboard;
+});
 
 ipcMain.handle('clipboard:read', () => {
   try { return clipboard.readText() || ''; } catch (_) { return ''; }
 });
 
 ipcMain.handle('clipboard:copy', (_e, text) => {
-  const value = String(text || '');
+  if (typeof text !== 'string' || text.length > 200000) {
+    return false;
+  }
+  const value = text;
   if (!value) return false;
   clipboard.writeText(value);
   lastClip = value;
@@ -2496,6 +3050,31 @@ ipcMain.handle('clipboard:copy', (_e, text) => {
 ipcMain.handle('clipboard:push-history', () => {
   try { pushClipboard(clipboard.readText()); } catch (_) {}
   return config.clipboard;
+});
+
+ipcMain.handle('clipboard:clear-history', async (event) => {
+  if (!trustedWindowEvent(event)) return { ok: false, error: 'Untrusted sender.' };
+  const approval = await dialog.showMessageBox(win, {
+    type: 'warning',
+    title: 'Clear clipboard history?',
+    message: 'Remove all saved clipboard-history entries?',
+    detail: 'This does not change the current Windows clipboard. The saved history cannot be restored.',
+    buttons: ['Clear history', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true
+  });
+  if (approval.response !== 0) return { ok: false, cancelled: true };
+  const previous = config.clipboard;
+  config.clipboard = [];
+  try {
+    persistConfigStrict();
+  } catch (error) {
+    config.clipboard = previous;
+    return { ok: false, error: `Could not clear clipboard history: ${String((error && error.message) || error)}` };
+  }
+  send('clipboard:changed', config.clipboard);
+  return { ok: true, clipboard: config.clipboard };
 });
 
 ipcMain.handle('launch:app', (_e, target) => {
@@ -2522,6 +3101,17 @@ ipcMain.handle('launch:app', (_e, target) => {
 ipcMain.handle('news:cached', () => getCachedNewsBriefing());
 
 ipcMain.handle('news:briefing', (_e, options) => getNewsBriefing(Boolean(options && options.refresh)));
+
+ipcMain.handle('external:open', async (_e, target) => {
+  const url = parseApprovedExternalUrl(target);
+  if (!url) return { ok: false, error: 'Only valid HTTP or HTTPS links can be opened externally.' };
+  try {
+    await shell.openExternal(url);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: String((error && error.message) || error) };
+  }
+});
 
 ipcMain.handle('news:open-article', async (_e, target) => {
   let url;
@@ -2666,15 +3256,21 @@ ipcMain.handle('screen:capture', async () => {
   }
 });
 
-ipcMain.handle('file:read', (_e, filePath) => {
+ipcMain.handle('file:read-dropped', (_e, filePath) => {
   try {
-    const abs = path.resolve(String(filePath || ''));
+    if (typeof filePath !== 'string' || filePath.length > 32768 || !path.isAbsolute(filePath)) {
+      return { ok: false, error: 'Drop a valid file from your computer.' };
+    }
+    if (fs.lstatSync(filePath).isSymbolicLink()) return { ok: false, error: 'Symbolic-link files cannot be added.' };
+    const abs = fs.realpathSync(filePath);
     const stat = fs.statSync(abs);
     if (!stat.isFile()) return { ok: false, error: 'not a file' };
     if (stat.size > 1.5 * 1024 * 1024) return { ok: false, error: 'file is larger than 1.5 MB' };
-    const okExt = /\.(txt|md|markdown|json|csv|tsv|log|js|mjs|cjs|ts|tsx|jsx|py|rb|go|rs|java|c|h|cpp|hpp|cs|css|scss|sass|less|html|htm|xml|svg|yml|yaml|toml|ini|cfg|conf|sh|bash|ps1|sql|env|gitignore)$/i;
+    if (isSensitiveWorkspaceFile(path.basename(abs))) return { ok: false, error: 'Sensitive files cannot be added as context.' };
+    const okExt = /\.(txt|md|markdown|json|csv|tsv|log|js|mjs|cjs|ts|tsx|jsx|py|rb|go|rs|java|c|h|cpp|hpp|cs|css|scss|sass|less|html|htm|xml|svg|yml|yaml|toml|ini|cfg|conf|sh|bash|ps1|sql|gitignore)$/i;
     if (!okExt.test(abs)) return { ok: false, error: 'unsupported file type' };
     const raw = fs.readFileSync(abs, 'utf8');
+    if (raw.includes('\u0000')) return { ok: false, error: 'Binary files cannot be added as context.' };
     return { ok: true, name: path.basename(abs), content: raw.slice(0, 200000), truncated: raw.length > 200000 };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
