@@ -61,7 +61,7 @@ Project checks are limited to supported test/build command forms, use explicit e
 
 Implemented: chat with Ollama, Gemini, and OpenAI-compatible providers; microphone speech recognition where supported by the runtime and Windows permissions; tasks and reminders; weather and daily briefing; focus timer; system monitoring; configurable CPU/RAM warnings; clipboard controls; mascot idle/listening/thinking/speaking/working feedback; and supervised coding-workspace tools.
 
-The mascot's speaking state is visual feedback after an assistant response; it does not mean text-to-speech is enabled. Automatic OS-level sandboxing of project scripts is not implemented. No additional planned features are promised by this README.
+The mascot can read AI responses aloud using the speech synthesis voices available in the local Windows/Electron runtime. Automatic speech is enabled by default and can be disabled in Settings; each AI response also has manual play, pause, resume, stop, and replay controls. The app prefers a female-named installed voice when no voice is selected, but voice names and quality vary by Windows installation. The app does not configure or call a third-party TTS API; synthesis is delegated to the Windows/Electron speech runtime. Voice availability and whether a particular Windows voice uses online services depend on the installed voice and Windows settings. Automatic OS-level sandboxing of project scripts is not implemented.
 
 ## Tests and packaging
 

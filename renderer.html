@@ -239,6 +239,12 @@
     border-bottom-right-radius: 6px;
   }
   .msg.rich { white-space: normal; padding: 8px 9px; }
+  .tts-controls { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,.08); }
+  .tts-button { border: 1px solid rgba(255,255,255,.12); border-radius: 7px; padding: 3px 6px; background: rgba(255,255,255,.06); color: rgba(244,244,247,.72); font-size: 9px; cursor: pointer; }
+  .tts-button:hover { background: rgba(255,255,255,.14); color: #fff; }
+  .voice-setting-row { display: flex; align-items: center; gap: 8px; }
+  .voice-setting-row input[type="range"] { flex: 1; min-width: 0; }
+  .voice-setting-value { min-width: 34px; text-align: right; font-size: 10px; color: rgba(244,244,247,.65); }
   .msg.briefing-card {
     width: 100%;
     max-width: 100%;
@@ -1485,6 +1491,25 @@
               <label class="toggle"><input type="checkbox" id="setUseEmojis"> Use emojis in casual replies</label>
               <p class="optimizer-note">CyberMascot keeps serious and technical answers focused, whatever humor level you choose.</p>
 
+              <div class="field">
+                <label>Voice-over</label>
+                <label class="toggle"><input type="checkbox" id="setVoiceAutoPlay"> Automatically read AI responses aloud</label>
+              </div>
+              <div class="field">
+                <label for="setVoiceName">Voice (female preferred)</label>
+                <select id="setVoiceName"><option value="">Automatic (prefer a female voice)</option></select>
+                <p class="optimizer-note">Uses the built-in Windows/Electron speech runtime. Available voices vary by device and language; some Windows voices may rely on online services.</p>
+              </div>
+              <div class="field">
+                <label for="setVoiceRate">Speech speed</label>
+                <div class="voice-setting-row"><input type="range" id="setVoiceRate" min="0.7" max="1.3" step="0.1"><span class="voice-setting-value" id="voiceRateValue">1.0×</span></div>
+              </div>
+              <div class="field">
+                <label for="setVoiceVolume">Speech volume</label>
+                <div class="voice-setting-row"><input type="range" id="setVoiceVolume" min="0" max="1" step="0.05"><span class="voice-setting-value" id="voiceVolumeValue">100%</span></div>
+              </div>
+              <div class="row"><button type="button" class="mini-btn" id="voiceTestButton">Test voice</button><button type="button" class="mini-btn" id="voiceStopButton">Stop speech</button><span class="optimizer-note" id="voicePlaybackStatus" aria-live="polite">Ready</span></div>
+
               <button type="button" class="mini-btn danger wide" id="clearMemory">Clear conversation memory</button>
 
               <div class="field">
@@ -1626,6 +1651,7 @@
 <script src="vendor/prism-python.js"></script>
 <script src="vendor/prism-typescript.js"></script>
 <script src="vendor/prism-jsx.js"></script>
+<script src="voice.js"></script>
 <script src="renderer.js"></script>
 </body>
 </html>

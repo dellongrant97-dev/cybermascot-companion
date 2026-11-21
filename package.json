@@ -33,6 +33,7 @@
     "files": [
       "main.js",
       "workspace-utils.js",
+      "voice.js",
       "preload.js",
       "renderer.js",
       "renderer.html",
