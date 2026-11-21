@@ -123,7 +123,7 @@ const DEFAULT_CONFIG = {
     apiKey: ''
   },
   weather: { city: 'Nairobi', latitude: -1.2921, longitude: 36.8219, place: 'Nairobi, Kenya', useDeviceLocation: true, deviceLocation: null },
-  settings: { idleMinutes: 3, unit: 'C', alwaysOnTop: true, launchAtLogin: true, opacity: 0.55, notifications: true, clock: '24', accessory: 'classic', performance: false, dnd: false, humorLevel: 'medium', useEmojis: true, cpuWarningThreshold: 90, memoryWarningThreshold: 90, clipboardHistoryPaused: false, clipboardRetentionDays: 0 },
+  settings: { idleMinutes: 3, unit: 'C', alwaysOnTop: true, launchAtLogin: true, opacity: 0.55, notifications: true, clock: '24', accessory: 'classic', performance: false, dnd: false, humorLevel: 'medium', useEmojis: true, cpuWarningThreshold: 90, memoryWarningThreshold: 90, clipboardHistoryPaused: false, clipboardRetentionDays: 0, voiceAutoPlay: true, voiceName: '', voiceRate: 1, voiceVolume: 1 },
   workspacePath: '',
   mascot: null,
   clipboard: []
@@ -2763,7 +2763,7 @@ function validateSettingsPatch(patch) {
     const allowed = new Set([
       'idleMinutes', 'unit', 'alwaysOnTop', 'launchAtLogin', 'notifications',
       'performance', 'dnd', 'clock', 'opacity', 'accessory', 'humorLevel', 'useEmojis',
-      'cpuWarningThreshold', 'memoryWarningThreshold', 'clipboardHistoryPaused', 'clipboardRetentionDays'
+      'cpuWarningThreshold', 'memoryWarningThreshold', 'clipboardHistoryPaused', 'clipboardRetentionDays', 'voiceAutoPlay', 'voiceName', 'voiceRate', 'voiceVolume'
     ]);
     if (!isPlainObject(values) || !hasOnlyKeys(values, allowed)) return 'Settings contain an unsupported field.';
     for (const [key, value] of Object.entries(values)) {
@@ -2781,6 +2781,10 @@ function validateSettingsPatch(patch) {
       }
       if (key === 'clipboardHistoryPaused' && typeof value !== 'boolean') return 'Clipboard history pause must be enabled or disabled.';
       if (key === 'clipboardRetentionDays' && ![0, 1, 7, 30].includes(value)) return 'Choose a supported clipboard-history retention period.';
+      if (key === 'voiceAutoPlay' && typeof value !== 'boolean') return 'Automatic voice playback must be enabled or disabled.';
+      if (key === 'voiceName' && (typeof value !== 'string' || value.length > 200 || /[\u0000-\u001f\u007f]/.test(value))) return 'Choose a valid installed voice.';
+      if (key === 'voiceRate' && (typeof value !== 'number' || value < 0.7 || value > 1.3)) return 'Speech rate must be between 0.7 and 1.3.';
+      if (key === 'voiceVolume' && (typeof value !== 'number' || value < 0 || value > 1)) return 'Speech volume must be between 0 and 1.';
     }
   }
   if (patch.chat !== undefined) {
