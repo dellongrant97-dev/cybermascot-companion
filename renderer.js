@@ -125,9 +125,19 @@ const attachStrip = document.getElementById('attachStrip');
 const screenCaptureSkill = document.getElementById('screenCaptureSkill');
 const mediaState = document.getElementById('mediaState');
 const mediaPlay = document.getElementById('mediaPlay');
+const voicePlaybackStatus = document.getElementById('voicePlaybackStatus');
 
 const api = window.companion;
 const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const voiceController = window.CyberMascotVoice ? window.CyberMascotVoice.createVoiceController({
+  synthesis: window.speechSynthesis,
+  Utterance: window.SpeechSynthesisUtterance,
+  onState: (state) => {
+    if (state === 'speaking') setMascotState('speaking');
+    else if (mascotState === 'speaking') restoreMascotState();
+    if (voicePlaybackStatus) voicePlaybackStatus.textContent = state === 'speaking' ? 'Speaking' : state === 'paused' ? 'Paused' : 'Ready';
+  }
+}) : null;
 
 const appState = {
   name: 'Dellon',
@@ -137,7 +147,7 @@ const appState = {
   model: '',
   baseUrl: '',
   ollamaUrl: 'http://127.0.0.1:11434',
-  settings: { idleMinutes: 3, unit: 'C', alwaysOnTop: true, launchAtLogin: true, opacity: 0.55, notifications: true, clock: '24', accessory: 'classic', performance: false, humorLevel: 'medium', useEmojis: true, cpuWarningThreshold: 90, memoryWarningThreshold: 90, clipboardHistoryPaused: false, clipboardRetentionDays: 0 },
+  settings: { idleMinutes: 3, unit: 'C', alwaysOnTop: true, launchAtLogin: true, opacity: 0.55, notifications: true, clock: '24', accessory: 'classic', performance: false, humorLevel: 'medium', useEmojis: true, cpuWarningThreshold: 90, memoryWarningThreshold: 90, clipboardHistoryPaused: false, clipboardRetentionDays: 0, voiceAutoPlay: true, voiceName: '', voiceRate: 1, voiceVolume: 1 },
   weather: null,
   weatherLocationEnabled: true,
   clipboard: [],
@@ -811,6 +821,30 @@ function addDailyBriefingCard(briefing) {
   loadNewsBriefing(news);
 }
 
+function getVoiceSettings() {
+  return { voiceName: appState.settings.voiceName || '', rate: Number(appState.settings.voiceRate) || 1, volume: Number.isFinite(appState.settings.voiceVolume) ? appState.settings.voiceVolume : 1 };
+}
+function speakResponse(text) {
+  if (!voiceController || !voiceController.isSupported()) { showThought('Speech synthesis is not available in this Windows installation.'); return false; }
+  const result = voiceController.speak(text, getVoiceSettings());
+  if (!result.ok) showThought(result.error || 'Could not start speech playback.');
+  return result.ok;
+}
+function addVoiceControls(container, content) {
+  if (!voiceController || !voiceController.isSupported()) return;
+  const controls = document.createElement('div'); controls.className = 'tts-controls';
+  const actions = [['Play', () => speakResponse(content)], ['Pause', () => voiceController.pause()], ['Resume', () => voiceController.resume()], ['Stop', () => voiceController.stop()], ['Replay', () => { const result = voiceController.replay(getVoiceSettings()); if (!result.ok) showThought(result.error); }]];
+  for (const [label, action] of actions) { const button = document.createElement('button'); button.type = 'button'; button.className = 'tts-button'; button.textContent = label; button.setAttribute('aria-label', label + ' this response'); button.addEventListener('click', action); controls.appendChild(button); }
+  container.appendChild(controls);
+}
+function populateVoiceOptions() {
+  const select = document.getElementById('setVoiceName'); if (!select || !voiceController) return;
+  const current = appState.settings.voiceName || ''; const voices = voiceController.getVoices(); select.replaceChildren();
+  const automatic = document.createElement('option'); automatic.value = ''; automatic.textContent = 'Automatic (prefer a female voice)'; select.appendChild(automatic);
+  for (const voice of voices) { const option = document.createElement('option'); option.value = voice.name; option.textContent = voice.name + (voice.lang ? ' · ' + voice.lang : ''); select.appendChild(option); }
+  select.value = voices.some((voice) => voice.name === current) ? current : '';
+}
+
 function renderMarkdown(text) {
   const div = document.createElement('div');
   div.className = 'msg bot rich';
@@ -823,6 +857,7 @@ function renderMarkdown(text) {
   div.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(html) : '';
   if (!div.innerHTML) div.textContent = text;
   decorateCode(div);
+  addVoiceControls(div, text);
   messagesEl.appendChild(div);
   messagesEl.scrollTop = messagesEl.scrollHeight;
   return div;
@@ -939,7 +974,8 @@ async function requestReply(image) {
     chatHistory.push({ role: 'assistant', content });
     api.appendHistory({ role: 'assistant', content });
     renderMarkdown(content);
-    setMascotState('speaking', 1800);
+    if (appState.settings.voiceAutoPlay !== false) speakResponse(content);
+    else setMascotState('speaking', 1800);
     return;
   }
   const provider = appState.provider === 'openai'
@@ -2644,6 +2680,12 @@ function syncSettingsForm() {
   document.getElementById('setOpacity').value = String(Math.round((s.opacity || 0.55) * 100));
   document.getElementById('setClock').value = s.clock || '24';
   document.getElementById('setAccessory').value = s.accessory || 'classic';
+  document.getElementById('setVoiceAutoPlay').checked = s.voiceAutoPlay !== false;
+  document.getElementById('setVoiceRate').value = String(Number(s.voiceRate) || 1);
+  document.getElementById('setVoiceVolume').value = String(Number.isFinite(s.voiceVolume) ? s.voiceVolume : 1);
+  document.getElementById('voiceRateValue').textContent = (Number(s.voiceRate) || 1).toFixed(1) + '×';
+  document.getElementById('voiceVolumeValue').textContent = Math.round((Number.isFinite(s.voiceVolume) ? s.voiceVolume : 1) * 100) + '%';
+  populateVoiceOptions();
 }
 
 function updateProviderFields() {
@@ -2854,6 +2896,14 @@ document.getElementById('setHumorLevel').addEventListener('change', (event) => {
 document.getElementById('setUseEmojis').addEventListener('change', (event) => {
   saveSettings({ settings: { useEmojis: event.target.checked } });
 });
+document.getElementById('setVoiceAutoPlay').addEventListener('change', (event) => saveSettings({ settings: { voiceAutoPlay: event.target.checked } }));
+document.getElementById('setVoiceName').addEventListener('change', (event) => saveSettings({ settings: { voiceName: event.target.value } }));
+document.getElementById('setVoiceRate').addEventListener('input', (event) => { document.getElementById('voiceRateValue').textContent = Number(event.target.value).toFixed(1) + '×'; });
+document.getElementById('setVoiceRate').addEventListener('change', (event) => saveSettings({ settings: { voiceRate: Number(event.target.value) } }));
+document.getElementById('setVoiceVolume').addEventListener('input', (event) => { document.getElementById('voiceVolumeValue').textContent = Math.round(Number(event.target.value) * 100) + '%'; });
+document.getElementById('setVoiceVolume').addEventListener('change', (event) => saveSettings({ settings: { voiceVolume: Number(event.target.value) } }));
+document.getElementById('voiceTestButton').addEventListener('click', () => speakResponse('Hello. I am CyberMascot, your personal AI companion. I am ready to help.'));
+document.getElementById('voiceStopButton').addEventListener('click', () => { if (voiceController) voiceController.stop(); });
 
 setPerf.addEventListener('change', (e) => {
   document.body.classList.toggle('perf', e.target.checked);
@@ -3204,6 +3254,8 @@ window.__mascot = {
   appState.baseUrl = state.baseUrl || '';
   appState.ollamaUrl = state.ollamaUrl || 'http://127.0.0.1:11434';
   appState.settings = { ...appState.settings, ...(state.settings || {}) };
+  populateVoiceOptions();
+  if (window.speechSynthesis) window.speechSynthesis.addEventListener('voiceschanged', populateVoiceOptions);
   appState.autostartError = state.autostartError || '';
   appState.keyStorageError = state.keyStorageError || '';
   if (appState.keyStorageError) flashNote(appState.keyStorageError);
